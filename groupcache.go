@@ -232,6 +232,12 @@ func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	return setSinkView(dest, value)
 }
 
+// PopulateCache is used to cache data that was obtained out-of-band.
+// - jschiller@twitter.com
+func (g *Group) PopulateCache(key string, data []byte) {
+	g.populateCache(key, ByteView{b: data}, &g.mainCache)
+}
+
 // load loads key either by invoking the getter locally or by sending it to another machine.
 func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
 	g.Stats.Loads.Add(1)
