@@ -19,17 +19,18 @@ limitations under the License.
 package groupcache
 
 import (
-	pb "github.com/golang/groupcache/groupcachepb"
+	pb "github.com/twitter/groupcache/groupcachepb"
 )
 
 // Context is an opaque value passed through calls to the
-// ProtoGetter. It may be nil if your ProtoGetter implementation does
+// ProtoPeer. It may be nil if your ProtoPeer implementation does
 // not require a context.
 type Context interface{}
 
-// ProtoGetter is the interface that must be implemented by a peer.
-type ProtoGetter interface {
+// ProtoPeer is the interface that must be implemented by a peer.
+type ProtoPeer interface {
 	Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error
+	Put(context Context, in *pb.PutRequest, out *pb.PutResponse) error
 }
 
 // PeerPicker is the interface that must be implemented to locate
@@ -38,13 +39,13 @@ type PeerPicker interface {
 	// PickPeer returns the peer that owns the specific key
 	// and true to indicate that a remote peer was nominated.
 	// It returns nil, false if the key owner is the current peer.
-	PickPeer(key string) (peer ProtoGetter, ok bool)
+	PickPeer(key string) (peer ProtoPeer, ok bool)
 }
 
 // NoPeers is an implementation of PeerPicker that never finds a peer.
 type NoPeers struct{}
 
-func (NoPeers) PickPeer(key string) (peer ProtoGetter, ok bool) { return }
+func (NoPeers) PickPeer(key string) (peer ProtoPeer, ok bool) { return }
 
 var (
 	portPicker func(groupName string) PeerPicker

@@ -28,7 +28,19 @@ message GetResponse {
   optional double minute_qps = 2;
 }
 
+message PutRequest {
+  required string group = 1;
+  required string key = 2; // not actually required/guaranteed to be UTF-8
+  required bytes value = 3;
+}
+
+message PutResponse {
+  optional double minute_qps = 1;
+}
+
 service GroupCache {
   rpc Get(GetRequest) returns (GetResponse) {
+  };
+  rpc Put(PutRequest) returns (PutResponse) {
   };
 }

@@ -22,6 +22,8 @@ limitations under the License.
 // or finally gets the data.  In the common case, many concurrent
 // cache misses across a set of peers for the same key result in just
 // one cache fill.
+//
+// Put supports manual loading of a data's canonical owner's cache.
 package groupcache
 
 import (
@@ -31,9 +33,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	pb "github.com/golang/groupcache/groupcachepb"
-	"github.com/golang/groupcache/lru"
-	"github.com/golang/groupcache/singleflight"
+	pb "github.com/twitter/groupcache/groupcachepb"
+	"github.com/twitter/groupcache/lru"
+	"github.com/twitter/groupcache/singleflight"
 )
 
 // A Getter loads data for a key.
@@ -54,6 +56,30 @@ func (f GetterFunc) Get(ctx Context, key string, dest Sink) error {
 	return f(ctx, key, dest)
 }
 
+// A Putter stores data for a key.
+type Putter interface {
+	// Put stores the data identified by key in the cache.
+	//
+	// Data to be stored must be unversioned as per Getters.
+	// Data cannot be invalidated - it is assumed that
+	// putting any data with a preexisting key can be
+	// interpreted as a no-op.
+	Put(ctx Context, key string, data []byte) error
+}
+
+// A PutterFunc implements Putter with a function.
+type PutterFunc func(ctx Context, key string, data []byte) error
+
+func (f PutterFunc) Put(ctx Context, key string, data []byte) error {
+	return f(ctx, key, data)
+}
+
+// A GetterPutter combines the Getter and Putter interfaces.
+type GetterPutter interface {
+	Getter
+	Putter
+}
+
 var (
 	mu     sync.RWMutex
 	groups = make(map[string]*Group)
@@ -71,23 +97,26 @@ func GetGroup(name string) *Group {
 	return g
 }
 
-// NewGroup creates a coordinated group-aware Getter from a Getter.
+// NewGroup creates a coordinated group-aware Getter/Putter.
 //
-// The returned Getter tries (but does not guarantee) to run only one
-// Get call at once for a given key across an entire set of peer
+// The returned Getter/Putter tries (but does not guarantee) to run only one
+// Get/Put call at once for a given key across an entire set of peer
 // processes. Concurrent callers both in the local process and in
-// other processes receive copies of the answer once the original Get
+// other processes receive copies of the answer once the original Get/Put
 // completes.
 //
-// The group name must be unique for each getter.
-func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
-	return newGroup(name, cacheBytes, getter, nil)
+// The group name must be unique for each getter/putter.
+func NewGroup(name string, cacheBytes int64, getter Getter, putter Putter) *Group {
+	return newGroup(name, cacheBytes, getter, putter, nil)
 }
 
 // If peers is nil, the peerPicker is called via a sync.Once to initialize it.
-func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *Group {
+func newGroup(name string, cacheBytes int64, getter Getter, putter Putter, peers PeerPicker) *Group {
 	if getter == nil {
 		panic("nil Getter")
+	}
+	if putter == nil {
+		panic("nil Putter")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -98,6 +127,7 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 	g := &Group{
 		name:       name,
 		getter:     getter,
+		putter:     putter,
 		peers:      peers,
 		cacheBytes: cacheBytes,
 		loadGroup:  &singleflight.Group{},
@@ -141,6 +171,7 @@ func callInitPeerServer() {
 type Group struct {
 	name       string
 	getter     Getter
+	putter     Putter
 	peersOnce  sync.Once
 	peers      PeerPicker
 	cacheBytes int64 // limit for sum of mainCache and hotCache size
@@ -183,14 +214,20 @@ type flightGroup interface {
 // Stats are per-group statistics.
 type Stats struct {
 	Gets           AtomicInt // any Get request, including from peers
+	Puts           AtomicInt // any Put request, including from peers
 	CacheHits      AtomicInt // either cache was good
-	PeerLoads      AtomicInt // either remote load or remote cache hit (not an error)
-	PeerErrors     AtomicInt
-	Loads          AtomicInt // (gets - cacheHits)
+	Loads          AtomicInt // Gets not from the cache
 	LoadsDeduped   AtomicInt // after singleflight
 	LocalLoads     AtomicInt // total good local loads
 	LocalLoadErrs  AtomicInt // total bad local loads
-	ServerRequests AtomicInt // gets that came over the network from peers
+	Stores         AtomicInt // Puts that weren't in the cache
+	StoresDeduped  AtomicInt // after singleflight
+	LocalStores    AtomicInt // total good local stores
+	LocalStoreErrs AtomicInt // total bad local stores
+	PeerStores     AtomicInt // either remote store or remote cache hit (not an error)
+	PeerLoads      AtomicInt // either remote load or remote cache hit (not an error)
+	PeerErrors     AtomicInt
+	ServerRequests AtomicInt // requests that came over the network from peers
 }
 
 // Name returns the name of the group.
@@ -232,10 +269,32 @@ func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	return setSinkView(dest, value)
 }
 
-// PopulateCache is used to cache data that was obtained out-of-band.
-// - jschiller@twitter.com
-func (g *Group) PopulateCache(key string, data []byte) {
-	g.populateCache(key, ByteView{b: data}, &g.mainCache)
+func (g *Group) Put(ctx Context, key string, data []byte) error {
+	g.peersOnce.Do(g.initPeers)
+	g.Stats.Puts.Add(1)
+	if data == nil {
+		return errors.New("groupcache: nil data")
+	}
+	_, cacheHit := g.lookupCache(key)
+
+	if cacheHit {
+		g.Stats.CacheHits.Add(1)
+		return nil
+	}
+
+	// Optimization to avoid double unmarshalling or copying: keep
+	// track of whether the dest was already populated. One caller
+	// (if local) will set this; the losers will not. The common
+	// case will likely be one caller.
+	destPopulated := false
+	destPopulated, err := g.store(ctx, key, data)
+	if err != nil {
+		return err
+	}
+	if destPopulated {
+		return nil
+	}
+	return nil
 }
 
 // load loads key either by invoking the getter locally or by sending it to another machine.
@@ -251,7 +310,7 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		// be only one entry for this key.
 		//
 		// Consider the following serialized event ordering for two
-		// goroutines in which this callback gets called twice for hte
+		// goroutines in which this callback gets called twice for the
 		// same key:
 		// 1: Get("key")
 		// 2: Get("key")
@@ -298,6 +357,39 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 	return
 }
 
+// store stores data for key either by invoking the putter locally or by sending it to another machine.
+func (g *Group) store(ctx Context, key string, data []byte) (destPopulated bool, err error) {
+	g.Stats.Stores.Add(1)
+	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
+		// Deduplication checks - see explanation in load()
+		if _, cacheHit := g.lookupCache(key); cacheHit {
+			g.Stats.CacheHits.Add(1)
+			return nil, nil
+		}
+		g.Stats.StoresDeduped.Add(1)
+		var err error
+		if peer, ok := g.peers.PickPeer(key); ok {
+			err = g.putFromPeer(ctx, peer, key, data)
+			if err == nil {
+				g.Stats.PeerStores.Add(1)
+				return nil, nil
+			}
+			g.Stats.PeerErrors.Add(1)
+		}
+		err = g.putLocally(ctx, key, data)
+		if err != nil {
+			g.Stats.LocalStoreErrs.Add(1)
+			return nil, err
+		}
+		g.Stats.LocalStores.Add(1)
+		destPopulated = true // only one caller of load gets this return value
+		value := ByteView{b: data}
+		g.populateCache(key, value, &g.mainCache)
+		return nil, nil
+	})
+	return
+}
+
 func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error) {
 	err := g.getter.Get(ctx, key, dest)
 	if err != nil {
@@ -306,7 +398,7 @@ func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error)
 	return dest.view()
 }
 
-func (g *Group) getFromPeer(ctx Context, peer ProtoGetter, key string) (ByteView, error) {
+func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, error) {
 	req := &pb.GetRequest{
 		Group: &g.name,
 		Key:   &key,
@@ -324,6 +416,31 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoGetter, key string) (ByteView
 		g.populateCache(key, value, &g.hotCache)
 	}
 	return value, nil
+}
+
+func (g *Group) putLocally(ctx Context, key string, data []byte) error {
+	return g.putter.Put(ctx, key, data)
+}
+
+func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte) error {
+	req := &pb.PutRequest{
+		Group: &g.name,
+		Key:   &key,
+		Value: data,
+	}
+	res := &pb.PutResponse{}
+	err := peer.Put(ctx, req, res)
+	if err != nil {
+		return err
+	}
+	value := ByteView{b: data}
+	// TODO(bradfitz): use res.MinuteQps or something smart to
+	// conditionally populate hotCache.  For now just do it some
+	// percentage of the time.
+	if rand.Intn(10) == 0 {
+		g.populateCache(key, value, &g.hotCache)
+	}
+	return nil
 }
 
 func (g *Group) lookupCache(key string) (value ByteView, ok bool) {

@@ -31,13 +31,13 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	pb "github.com/golang/groupcache/groupcachepb"
-	testpb "github.com/golang/groupcache/testpb"
+	pb "github.com/twitter/groupcache/groupcachepb"
+	testpb "github.com/twitter/groupcache/testpb"
 )
 
 var (
 	once                    sync.Once
-	stringGroup, protoGroup Getter
+	stringGroup, protoGroup GetterPutter
 
 	stringc = make(chan string)
 
@@ -47,6 +47,8 @@ var (
 	// protoGroup's Getter have been called. Read using the
 	// cacheFills function.
 	cacheFills AtomicInt
+	// like cacheFills, but for the group's Putter
+	cachePuts AtomicInt
 )
 
 const (
@@ -58,24 +60,46 @@ const (
 )
 
 func testSetup() {
-	stringGroup = NewGroup(stringGroupName, cacheSize, GetterFunc(func(_ Context, key string, dest Sink) error {
-		if key == fromChan {
-			key = <-stringc
-		}
-		cacheFills.Add(1)
-		return dest.SetString("ECHO:" + key)
-	}))
+	stringGroup = NewGroup(
+		stringGroupName,
+		cacheSize,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheFills.Add(1)
+			return dest.SetString("ECHO:" + key)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cachePuts.Add(1)
+			return nil
+		}),
+	)
 
-	protoGroup = NewGroup(protoGroupName, cacheSize, GetterFunc(func(_ Context, key string, dest Sink) error {
-		if key == fromChan {
-			key = <-stringc
-		}
-		cacheFills.Add(1)
-		return dest.SetProto(&testpb.TestMessage{
-			Name: proto.String("ECHO:" + key),
-			City: proto.String("SOME-CITY"),
-		})
-	}))
+	protoGroup = NewGroup(
+		protoGroupName,
+		cacheSize,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheFills.Add(1)
+			return dest.SetProto(&testpb.TestMessage{
+				Name: proto.String("ECHO:" + key),
+				City: proto.String("SOME-CITY"),
+			})
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cachePuts.Add(1)
+			return nil
+		}),
+	)
 }
 
 // tests that a Getter's Get method is only called once with two
@@ -239,9 +263,17 @@ func (p *fakePeer) Get(_ Context, in *pb.GetRequest, out *pb.GetResponse) error 
 	return nil
 }
 
-type fakePeers []ProtoGetter
+func (p *fakePeer) Put(_ Context, in *pb.PutRequest, out *pb.PutResponse) error {
+	p.hits++
+	if p.fail {
+		return errors.New("simulated error from peer")
+	}
+	return nil
+}
 
-func (p fakePeers) PickPeer(key string) (peer ProtoGetter, ok bool) {
+type fakePeers []ProtoPeer
+
+func (p fakePeers) PickPeer(key string) (peer ProtoPeer, ok bool) {
 	if len(p) == 0 {
 		return
 	}
@@ -256,14 +288,18 @@ func TestPeers(t *testing.T) {
 	peer0 := &fakePeer{}
 	peer1 := &fakePeer{}
 	peer2 := &fakePeer{}
-	peerList := fakePeers([]ProtoGetter{peer0, peer1, peer2, nil})
+	peerList := fakePeers([]ProtoPeer{peer0, peer1, peer2, nil})
 	const cacheSize = 0 // disabled
 	localHits := 0
 	getter := func(_ Context, key string, dest Sink) error {
 		localHits++
 		return dest.SetString("got:" + key)
 	}
-	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), peerList)
+	putter := func(_ Context, key string, data []byte) error {
+		localHits++
+		return nil
+	}
+	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), PutterFunc(putter), peerList)
 	run := func(name string, n int, wantSummary string) {
 		// Reset counters
 		localHits = 0
@@ -387,9 +423,17 @@ func (g *orderedFlightGroup) Do(key string, fn func() (interface{}, error)) (int
 func TestNoDedup(t *testing.T) {
 	const testkey = "testkey"
 	const testval = "testval"
-	g := newGroup("testgroup", 1024, GetterFunc(func(_ Context, key string, dest Sink) error {
-		return dest.SetString(testval)
-	}), nil)
+	g := newGroup(
+		"testgroup",
+		1024,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			return dest.SetString(testval)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			return nil
+		}),
+		nil,
+	)
 
 	orderedGroup := &orderedFlightGroup{
 		stage1: make(chan bool),
