@@ -241,6 +241,8 @@ func (g *Group) initPeers() {
 	}
 }
 
+// Get functions
+
 func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Gets.Add(1)
@@ -269,35 +271,7 @@ func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	return setSinkView(dest, value)
 }
 
-func (g *Group) Put(ctx Context, key string, data []byte) error {
-	g.peersOnce.Do(g.initPeers)
-	g.Stats.Puts.Add(1)
-	if data == nil {
-		return errors.New("groupcache: nil data")
-	}
-	_, cacheHit := g.lookupCache(key)
-
-	if cacheHit {
-		g.Stats.CacheHits.Add(1)
-		return nil
-	}
-
-	// Optimization to avoid double unmarshalling or copying: keep
-	// track of whether the dest was already populated. One caller
-	// (if local) will set this; the losers will not. The common
-	// case will likely be one caller.
-	destPopulated := false
-	destPopulated, err := g.store(ctx, key, data)
-	if err != nil {
-		return err
-	}
-	if destPopulated {
-		return nil
-	}
-	return nil
-}
-
-// load loads key either by invoking the getter locally or by sending it to another machine.
+// underlying Get logic - loads key either by invoking the getter locally or by sending it to another machine.
 func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
 	g.Stats.Loads.Add(1)
 	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
@@ -357,39 +331,6 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 	return
 }
 
-// store stores data for key either by invoking the putter locally or by sending it to another machine.
-func (g *Group) store(ctx Context, key string, data []byte) (destPopulated bool, err error) {
-	g.Stats.Stores.Add(1)
-	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
-		// Deduplication checks - see explanation in load()
-		if _, cacheHit := g.lookupCache(key); cacheHit {
-			g.Stats.CacheHits.Add(1)
-			return nil, nil
-		}
-		g.Stats.StoresDeduped.Add(1)
-		var err error
-		if peer, ok := g.peers.PickPeer(key); ok {
-			err = g.putFromPeer(ctx, peer, key, data)
-			if err == nil {
-				g.Stats.PeerStores.Add(1)
-				return nil, nil
-			}
-			g.Stats.PeerErrors.Add(1)
-		}
-		err = g.putLocally(ctx, key, data)
-		if err != nil {
-			g.Stats.LocalStoreErrs.Add(1)
-			return nil, err
-		}
-		g.Stats.LocalStores.Add(1)
-		destPopulated = true // only one caller of load gets this return value
-		value := ByteView{b: data}
-		g.populateCache(key, value, &g.mainCache)
-		return nil, nil
-	})
-	return
-}
-
 func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error) {
 	err := g.getter.Get(ctx, key, dest)
 	if err != nil {
@@ -418,6 +359,60 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, 
 	return value, nil
 }
 
+// Put functions
+
+func (g *Group) Put(ctx Context, key string, data []byte) error {
+	g.peersOnce.Do(g.initPeers)
+	g.Stats.Puts.Add(1)
+	if data == nil {
+		return errors.New("groupcache: nil data")
+	}
+	_, cacheHit := g.lookupCache(key)
+
+	if cacheHit {
+		g.Stats.CacheHits.Add(1)
+		return nil
+	}
+
+	err := g.store(ctx, key, data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// underlying Put logic - stores data for key either by invoking the putter locally or by sending it to another machine.
+func (g *Group) store(ctx Context, key string, data []byte) (err error) {
+	g.Stats.Stores.Add(1)
+	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
+		// Deduplication checks - see explanation in load()
+		if _, cacheHit := g.lookupCache(key); cacheHit {
+			g.Stats.CacheHits.Add(1)
+			return nil, nil
+		}
+		g.Stats.StoresDeduped.Add(1)
+		var err error
+		if peer, ok := g.peers.PickPeer(key); ok {
+			err = g.putFromPeer(ctx, peer, key, data)
+			if err == nil {
+				g.Stats.PeerStores.Add(1)
+				return nil, nil
+			}
+			g.Stats.PeerErrors.Add(1)
+		}
+		err = g.putLocally(ctx, key, data)
+		if err != nil {
+			g.Stats.LocalStoreErrs.Add(1)
+			return nil, err
+		}
+		g.Stats.LocalStores.Add(1)
+		value := ByteView{b: data}
+		g.populateCache(key, value, &g.mainCache)
+		return nil, nil
+	})
+	return
+}
+
 func (g *Group) putLocally(ctx Context, key string, data []byte) error {
 	return g.putter.Put(ctx, key, data)
 }
@@ -442,6 +437,8 @@ func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte
 	}
 	return nil
 }
+
+// Cache utils
 
 func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
 	if g.cacheBytes <= 0 {
