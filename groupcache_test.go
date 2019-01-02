@@ -31,13 +31,13 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	pb "github.com/golang/groupcache/groupcachepb"
-	testpb "github.com/golang/groupcache/testpb"
+	pb "github.com/twitter/groupcache/groupcachepb"
+	testpb "github.com/twitter/groupcache/testpb"
 )
 
 var (
 	once                    sync.Once
-	stringGroup, protoGroup Getter
+	stringGroup, protoGroup GetterPutter
 
 	stringc = make(chan string)
 
@@ -47,6 +47,8 @@ var (
 	// protoGroup's Getter have been called. Read using the
 	// cacheFills function.
 	cacheFills AtomicInt
+	// like cacheFills, but for the group's Putter
+	cachePuts AtomicInt
 )
 
 const (
@@ -58,24 +60,46 @@ const (
 )
 
 func testSetup() {
-	stringGroup = NewGroup(stringGroupName, cacheSize, GetterFunc(func(_ Context, key string, dest Sink) error {
-		if key == fromChan {
-			key = <-stringc
-		}
-		cacheFills.Add(1)
-		return dest.SetString("ECHO:" + key)
-	}))
+	stringGroup = NewGroup(
+		stringGroupName,
+		cacheSize,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheFills.Add(1)
+			return dest.SetString("ECHO:" + key)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cachePuts.Add(1)
+			return nil
+		}),
+	)
 
-	protoGroup = NewGroup(protoGroupName, cacheSize, GetterFunc(func(_ Context, key string, dest Sink) error {
-		if key == fromChan {
-			key = <-stringc
-		}
-		cacheFills.Add(1)
-		return dest.SetProto(&testpb.TestMessage{
-			Name: proto.String("ECHO:" + key),
-			City: proto.String("SOME-CITY"),
-		})
-	}))
+	protoGroup = NewGroup(
+		protoGroupName,
+		cacheSize,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheFills.Add(1)
+			return dest.SetProto(&testpb.TestMessage{
+				Name: proto.String("ECHO:" + key),
+				City: proto.String("SOME-CITY"),
+			})
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cachePuts.Add(1)
+			return nil
+		}),
+	)
 }
 
 // tests that a Getter's Get method is only called once with two
@@ -170,18 +194,36 @@ func countFills(f func()) int64 {
 	return cacheFills.Get() - fills0
 }
 
+func countPuts(f func()) int64 {
+	puts0 := cachePuts.Get()
+	f()
+	return cachePuts.Get() - puts0
+}
+
 func TestCaching(t *testing.T) {
 	once.Do(testSetup)
+	// gets
 	fills := countFills(func() {
 		for i := 0; i < 10; i++ {
 			var s string
-			if err := stringGroup.Get(dummyCtx, "TestCaching-key", StringSink(&s)); err != nil {
+			if err := stringGroup.Get(dummyCtx, "TestCaching-key1", StringSink(&s)); err != nil {
 				t.Fatal(err)
 			}
 		}
 	})
 	if fills != 1 {
 		t.Errorf("expected 1 cache fill; got %d", fills)
+	}
+	// puts
+	puts := countPuts(func() {
+		for i := 0; i < 10; i++ {
+			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if puts != 1 {
+		t.Errorf("expected 1 cache put; got %d", puts)
 	}
 }
 
@@ -239,9 +281,17 @@ func (p *fakePeer) Get(_ Context, in *pb.GetRequest, out *pb.GetResponse) error 
 	return nil
 }
 
-type fakePeers []ProtoGetter
+func (p *fakePeer) Put(_ Context, in *pb.PutRequest, out *pb.PutResponse) error {
+	p.hits++
+	if p.fail {
+		return errors.New("simulated error from peer")
+	}
+	return nil
+}
 
-func (p fakePeers) PickPeer(key string) (peer ProtoGetter, ok bool) {
+type fakePeers []ProtoPeer
+
+func (p fakePeers) PickPeer(key string) (peer ProtoPeer, ok bool) {
 	if len(p) == 0 {
 		return
 	}
@@ -256,19 +306,35 @@ func TestPeers(t *testing.T) {
 	peer0 := &fakePeer{}
 	peer1 := &fakePeer{}
 	peer2 := &fakePeer{}
-	peerList := fakePeers([]ProtoGetter{peer0, peer1, peer2, nil})
+	peerList := fakePeers([]ProtoPeer{peer0, peer1, peer2, nil})
 	const cacheSize = 0 // disabled
 	localHits := 0
 	getter := func(_ Context, key string, dest Sink) error {
 		localHits++
 		return dest.SetString("got:" + key)
 	}
-	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), peerList)
-	run := func(name string, n int, wantSummary string) {
+	putter := func(_ Context, key string, data []byte) error {
+		localHits++
+		return nil
+	}
+	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), PutterFunc(putter), peerList)
+	run := func(name string, n, m int, wantSummary string) {
 		// Reset counters
 		localHits = 0
 		for _, p := range []*fakePeer{peer0, peer1, peer2} {
 			p.hits = 0
+		}
+
+		// puts before gets - prepopulate to alter get hit rates
+		for j := 0; j < m; j++ {
+			key := fmt.Sprintf("key-%d", j)
+			want := "got:" + key
+			value := []byte(want)
+			err := testGroup.Put(dummyCtx, key, value)
+			if err != nil {
+				t.Errorf("%s: error on key %q: %v", name, key, err)
+				continue
+			}
 		}
 
 		for i := 0; i < n; i++ {
@@ -300,11 +366,11 @@ func TestPeers(t *testing.T) {
 
 	// Base case; peers all up, with no problems.
 	resetCacheSize(1 << 20)
-	run("base", 200, "localHits = 49, peers = 51 49 51")
+	run("base", 200, 0, "localHits = 49, peers = 51 49 51")
 
 	// Verify cache was hit.  All localHits are gone, and some of
 	// the peer hits (the ones randomly selected to be maybe hot)
-	run("cached_base", 200, "localHits = 0, peers = 49 47 48")
+	run("cached_base", 200, 0, "localHits = 0, peers = 49 47 48")
 	resetCacheSize(0)
 
 	// With one of the peers being down.
@@ -313,12 +379,15 @@ func TestPeers(t *testing.T) {
 	// spread the load out. Currently it fails back to local
 	// execution if the first consistent-hash slot is unavailable.
 	peerList[0] = nil
-	run("one_peer_down", 200, "localHits = 100, peers = 0 49 51")
+	run("one_peer_down", 200, 0, "localHits = 100, peers = 0 49 51")
 
 	// Failing peer
 	peerList[0] = peer0
 	peer0.fail = true
-	run("peer0_failing", 200, "localHits = 100, peers = 51 49 51")
+	run("peer0_failing", 200, 0, "localHits = 100, peers = 51 49 51")
+
+	resetCacheSize(1 << 20)
+	run("put", 1, 1, "localHits = 1, peers = 1 0 0")
 }
 
 func TestTruncatingByteSliceTarget(t *testing.T) {
@@ -387,9 +456,17 @@ func (g *orderedFlightGroup) Do(key string, fn func() (interface{}, error)) (int
 func TestNoDedup(t *testing.T) {
 	const testkey = "testkey"
 	const testval = "testval"
-	g := newGroup("testgroup", 1024, GetterFunc(func(_ Context, key string, dest Sink) error {
-		return dest.SetString(testval)
-	}), nil)
+	g := newGroup(
+		"testgroup",
+		1024,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			return dest.SetString(testval)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte) error {
+			return nil
+		}),
+		nil,
+	)
 
 	orderedGroup := &orderedFlightGroup{
 		stage1: make(chan bool),
