@@ -14,33 +14,34 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-syntax = "proto2";
+syntax = "proto3";
 
 package groupcachepb;
 
+import "google/protobuf/duration.proto";
+
 message GetRequest {
-  required string group = 1;
-  required string key = 2; // not actually required/guaranteed to be UTF-8
+  string group = 1;
+  string key = 2; // not actually required/guaranteed to be UTF-8
 }
 
 message GetResponse {
-  optional bytes value = 1;
-  optional double minute_qps = 2;
+  bytes value = 1;
+  double minute_qps = 2;
 }
 
 message PutRequest {
-  required string group = 1;
-  required string key = 2; // not actually required/guaranteed to be UTF-8
-  required bytes value = 3;
+  string group = 1;
+  string key = 2; // not actually required/guaranteed to be UTF-8
+  bytes value = 3;
+  google.protobuf.Duration ttl = 4;
 }
 
 message PutResponse {
-  optional double minute_qps = 1;
+  double minute_qps = 1;
 }
 
 service GroupCache {
-  rpc Get(GetRequest) returns (GetResponse) {
-  };
-  rpc Put(PutRequest) returns (PutResponse) {
-  };
+  rpc Get(GetRequest) returns (GetResponse) {};
+  rpc Put(PutRequest) returns (PutResponse) {};
 }
