@@ -66,7 +66,7 @@ type Putter interface {
 	// Data cannot be invalidated - it is assumed that
 	// putting any data with a preexisting key can be
 	// interpreted as a no-op.
-	// TTL is an optional duration value that may be
+	// TTL is a duration value that will be
 	// passed through to any underlying PutterFunc.
 	Put(ctx Context, key string, data []byte, ttl time.Duration) error
 }
