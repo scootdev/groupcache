@@ -70,7 +70,7 @@ func testSetup() {
 			cacheFills.Add(1)
 			return dest.SetString("ECHO:" + key)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -92,7 +92,7 @@ func testSetup() {
 				City: proto.String("SOME-CITY"),
 			})
 		}),
-		PutterFunc(func(_ Context, key string, data []byte) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -217,7 +217,7 @@ func TestCaching(t *testing.T) {
 	// puts
 	puts := countPuts(func() {
 		for i := 0; i < 10; i++ {
-			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value")); err != nil {
+			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value"), 1*time.Second); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -313,7 +313,7 @@ func TestPeers(t *testing.T) {
 		localHits++
 		return dest.SetString("got:" + key)
 	}
-	putter := func(_ Context, key string, data []byte) error {
+	putter := func(_ Context, key string, data []byte, ttl time.Duration) error {
 		localHits++
 		return nil
 	}
@@ -330,7 +330,8 @@ func TestPeers(t *testing.T) {
 			key := fmt.Sprintf("key-%d", j)
 			want := "got:" + key
 			value := []byte(want)
-			err := testGroup.Put(dummyCtx, key, value)
+			ttl := 1 * time.Second
+			err := testGroup.Put(dummyCtx, key, value, ttl)
 			if err != nil {
 				t.Errorf("%s: error on key %q: %v", name, key, err)
 				continue
@@ -462,7 +463,7 @@ func TestNoDedup(t *testing.T) {
 		GetterFunc(func(_ Context, key string, dest Sink) error {
 			return dest.SetString(testval)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
 			return nil
 		}),
 		nil,

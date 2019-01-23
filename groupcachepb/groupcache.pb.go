@@ -6,6 +6,7 @@ package groupcachepb
 import proto "github.com/golang/protobuf/proto"
 import fmt "fmt"
 import math "math"
+import duration "github.com/golang/protobuf/ptypes/duration"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -19,8 +20,8 @@ var _ = math.Inf
 const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
 
 type GetRequest struct {
-	Group                *string  `protobuf:"bytes,1,req,name=group" json:"group,omitempty"`
-	Key                  *string  `protobuf:"bytes,2,req,name=key" json:"key,omitempty"`
+	Group                string   `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Key                  string   `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -30,7 +31,7 @@ func (m *GetRequest) Reset()         { *m = GetRequest{} }
 func (m *GetRequest) String() string { return proto.CompactTextString(m) }
 func (*GetRequest) ProtoMessage()    {}
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_groupcache_10baffee5516add3, []int{0}
+	return fileDescriptor_groupcache_23d89e66d2af4cdc, []int{0}
 }
 func (m *GetRequest) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_GetRequest.Unmarshal(m, b)
@@ -51,22 +52,22 @@ func (m *GetRequest) XXX_DiscardUnknown() {
 var xxx_messageInfo_GetRequest proto.InternalMessageInfo
 
 func (m *GetRequest) GetGroup() string {
-	if m != nil && m.Group != nil {
-		return *m.Group
+	if m != nil {
+		return m.Group
 	}
 	return ""
 }
 
 func (m *GetRequest) GetKey() string {
-	if m != nil && m.Key != nil {
-		return *m.Key
+	if m != nil {
+		return m.Key
 	}
 	return ""
 }
 
 type GetResponse struct {
-	Value                []byte   `protobuf:"bytes,1,opt,name=value" json:"value,omitempty"`
-	MinuteQps            *float64 `protobuf:"fixed64,2,opt,name=minute_qps,json=minuteQps" json:"minute_qps,omitempty"`
+	Value                []byte   `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	MinuteQps            float64  `protobuf:"fixed64,2,opt,name=minute_qps,json=minuteQps,proto3" json:"minute_qps,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -76,7 +77,7 @@ func (m *GetResponse) Reset()         { *m = GetResponse{} }
 func (m *GetResponse) String() string { return proto.CompactTextString(m) }
 func (*GetResponse) ProtoMessage()    {}
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_groupcache_10baffee5516add3, []int{1}
+	return fileDescriptor_groupcache_23d89e66d2af4cdc, []int{1}
 }
 func (m *GetResponse) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_GetResponse.Unmarshal(m, b)
@@ -104,26 +105,27 @@ func (m *GetResponse) GetValue() []byte {
 }
 
 func (m *GetResponse) GetMinuteQps() float64 {
-	if m != nil && m.MinuteQps != nil {
-		return *m.MinuteQps
+	if m != nil {
+		return m.MinuteQps
 	}
 	return 0
 }
 
 type PutRequest struct {
-	Group                *string  `protobuf:"bytes,1,req,name=group" json:"group,omitempty"`
-	Key                  *string  `protobuf:"bytes,2,req,name=key" json:"key,omitempty"`
-	Value                []byte   `protobuf:"bytes,3,req,name=value" json:"value,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+	Group                string             `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Key                  string             `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Value                []byte             `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	Ttl                  *duration.Duration `protobuf:"bytes,4,opt,name=ttl,proto3" json:"ttl,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}           `json:"-"`
+	XXX_unrecognized     []byte             `json:"-"`
+	XXX_sizecache        int32              `json:"-"`
 }
 
 func (m *PutRequest) Reset()         { *m = PutRequest{} }
 func (m *PutRequest) String() string { return proto.CompactTextString(m) }
 func (*PutRequest) ProtoMessage()    {}
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_groupcache_10baffee5516add3, []int{2}
+	return fileDescriptor_groupcache_23d89e66d2af4cdc, []int{2}
 }
 func (m *PutRequest) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_PutRequest.Unmarshal(m, b)
@@ -144,15 +146,15 @@ func (m *PutRequest) XXX_DiscardUnknown() {
 var xxx_messageInfo_PutRequest proto.InternalMessageInfo
 
 func (m *PutRequest) GetGroup() string {
-	if m != nil && m.Group != nil {
-		return *m.Group
+	if m != nil {
+		return m.Group
 	}
 	return ""
 }
 
 func (m *PutRequest) GetKey() string {
-	if m != nil && m.Key != nil {
-		return *m.Key
+	if m != nil {
+		return m.Key
 	}
 	return ""
 }
@@ -164,8 +166,15 @@ func (m *PutRequest) GetValue() []byte {
 	return nil
 }
 
+func (m *PutRequest) GetTtl() *duration.Duration {
+	if m != nil {
+		return m.Ttl
+	}
+	return nil
+}
+
 type PutResponse struct {
-	MinuteQps            *float64 `protobuf:"fixed64,1,opt,name=minute_qps,json=minuteQps" json:"minute_qps,omitempty"`
+	MinuteQps            float64  `protobuf:"fixed64,1,opt,name=minute_qps,json=minuteQps,proto3" json:"minute_qps,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -175,7 +184,7 @@ func (m *PutResponse) Reset()         { *m = PutResponse{} }
 func (m *PutResponse) String() string { return proto.CompactTextString(m) }
 func (*PutResponse) ProtoMessage()    {}
 func (*PutResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_groupcache_10baffee5516add3, []int{3}
+	return fileDescriptor_groupcache_23d89e66d2af4cdc, []int{3}
 }
 func (m *PutResponse) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_PutResponse.Unmarshal(m, b)
@@ -196,8 +205,8 @@ func (m *PutResponse) XXX_DiscardUnknown() {
 var xxx_messageInfo_PutResponse proto.InternalMessageInfo
 
 func (m *PutResponse) GetMinuteQps() float64 {
-	if m != nil && m.MinuteQps != nil {
-		return *m.MinuteQps
+	if m != nil {
+		return m.MinuteQps
 	}
 	return 0
 }
@@ -209,22 +218,25 @@ func init() {
 	proto.RegisterType((*PutResponse)(nil), "groupcachepb.PutResponse")
 }
 
-func init() { proto.RegisterFile("groupcache.proto", fileDescriptor_groupcache_10baffee5516add3) }
+func init() { proto.RegisterFile("groupcache.proto", fileDescriptor_groupcache_23d89e66d2af4cdc) }
 
-var fileDescriptor_groupcache_10baffee5516add3 = []byte{
-	// 224 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x12, 0x48, 0x2f, 0xca, 0x2f,
-	0x2d, 0x48, 0x4e, 0x4c, 0xce, 0x48, 0xd5, 0x2b, 0x28, 0xca, 0x2f, 0xc9, 0x17, 0xe2, 0x41, 0x88,
-	0x14, 0x24, 0x29, 0x99, 0x70, 0x71, 0xb9, 0xa7, 0x96, 0x04, 0xa5, 0x16, 0x96, 0xa6, 0x16, 0x97,
-	0x08, 0x89, 0x70, 0xb1, 0x82, 0x65, 0x25, 0x18, 0x15, 0x98, 0x34, 0x38, 0x83, 0x20, 0x1c, 0x21,
-	0x01, 0x2e, 0xe6, 0xec, 0xd4, 0x4a, 0x09, 0x26, 0xb0, 0x18, 0x88, 0xa9, 0xe4, 0xc4, 0xc5, 0x0d,
-	0xd6, 0x55, 0x5c, 0x90, 0x9f, 0x57, 0x9c, 0x0a, 0xd2, 0x56, 0x96, 0x98, 0x53, 0x9a, 0x2a, 0xc1,
-	0xa8, 0xc0, 0xa8, 0xc1, 0x13, 0x04, 0xe1, 0x08, 0xc9, 0x72, 0x71, 0xe5, 0x66, 0xe6, 0x95, 0x96,
-	0xa4, 0xc6, 0x17, 0x16, 0x14, 0x4b, 0x30, 0x29, 0x30, 0x6a, 0x30, 0x06, 0x71, 0x42, 0x44, 0x02,
-	0x0b, 0x8a, 0x95, 0xbc, 0xb8, 0xb8, 0x02, 0x4a, 0x49, 0xb5, 0x19, 0x61, 0x15, 0xb3, 0x02, 0x13,
-	0xdc, 0x2a, 0x25, 0x1d, 0x2e, 0x6e, 0xb0, 0x59, 0x50, 0xf7, 0xa0, 0xda, 0xcc, 0x88, 0x66, 0xb3,
-	0x51, 0x07, 0x23, 0x17, 0x97, 0x3b, 0xc8, 0x7c, 0x67, 0x50, 0x20, 0x08, 0xd9, 0x70, 0x31, 0xbb,
-	0xa7, 0x96, 0x08, 0x49, 0xe8, 0x21, 0x07, 0x8c, 0x1e, 0x22, 0x54, 0xa4, 0x24, 0xb1, 0xc8, 0x40,
-	0x6c, 0x52, 0x62, 0x00, 0xe9, 0x0e, 0x28, 0xc5, 0xd0, 0x8d, 0xf0, 0x19, 0xba, 0x6e, 0x24, 0x77,
-	0x2a, 0x31, 0x00, 0x02, 0x00, 0x00, 0xff, 0xff, 0xaf, 0x31, 0xaf, 0xd5, 0x9f, 0x01, 0x00, 0x00,
+var fileDescriptor_groupcache_23d89e66d2af4cdc = []byte{
+	// 268 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x94, 0x90, 0xcd, 0x4a, 0x03, 0x31,
+	0x10, 0xc7, 0x1b, 0x57, 0x85, 0xce, 0xf6, 0x50, 0x82, 0x87, 0x6d, 0x41, 0x29, 0x39, 0x15, 0x94,
+	0x14, 0xaa, 0x47, 0x4f, 0x2a, 0xec, 0xb5, 0xe6, 0x05, 0x64, 0xb7, 0x8e, 0x6b, 0x71, 0xdd, 0xa4,
+	0x9b, 0x44, 0xf1, 0x0d, 0x7c, 0x6c, 0xc9, 0xa4, 0xb2, 0x6b, 0xf5, 0xe2, 0x2d, 0x99, 0x99, 0x1f,
+	0xff, 0x0f, 0x18, 0x57, 0xad, 0xf6, 0x66, 0x5d, 0xac, 0x9f, 0x51, 0x9a, 0x56, 0x3b, 0xcd, 0x47,
+	0xdd, 0xc4, 0x94, 0xd3, 0xb3, 0x4a, 0xeb, 0xaa, 0xc6, 0x05, 0xed, 0x4a, 0xff, 0xb4, 0x78, 0xf4,
+	0x6d, 0xe1, 0x36, 0xba, 0x89, 0xd7, 0xe2, 0x0a, 0x20, 0x47, 0xa7, 0x70, 0xeb, 0xd1, 0x3a, 0x7e,
+	0x02, 0x47, 0x44, 0x67, 0x6c, 0xc6, 0xe6, 0x43, 0x15, 0x3f, 0x7c, 0x0c, 0xc9, 0x0b, 0x7e, 0x64,
+	0x07, 0x34, 0x0b, 0x4f, 0x71, 0x03, 0x29, 0x51, 0xd6, 0xe8, 0xc6, 0x62, 0xc0, 0xde, 0x8a, 0xda,
+	0x23, 0x61, 0x23, 0x15, 0x3f, 0xfc, 0x14, 0xe0, 0x75, 0xd3, 0x78, 0x87, 0x0f, 0x5b, 0x63, 0x89,
+	0x66, 0x6a, 0x18, 0x27, 0xf7, 0xc6, 0x8a, 0x77, 0x80, 0x95, 0xff, 0xaf, 0x72, 0x27, 0x95, 0xf4,
+	0xa5, 0xce, 0x21, 0x71, 0xae, 0xce, 0x0e, 0x67, 0x6c, 0x9e, 0x2e, 0x27, 0x32, 0x66, 0x96, 0xdf,
+	0x99, 0xe5, 0xdd, 0x2e, 0xb3, 0x0a, 0x57, 0xe2, 0x02, 0x52, 0x12, 0xde, 0x99, 0xff, 0x69, 0x93,
+	0xed, 0xd9, 0x5c, 0x7e, 0x32, 0x80, 0x3c, 0x98, 0xb9, 0x0d, 0x8d, 0xf2, 0x6b, 0x48, 0x72, 0x74,
+	0x3c, 0x93, 0xfd, 0x96, 0x65, 0x57, 0xe1, 0x74, 0xf2, 0xc7, 0x26, 0x2a, 0x89, 0x41, 0xa0, 0x57,
+	0xfe, 0x17, 0xdd, 0xd5, 0xb0, 0x4f, 0xf7, 0x7c, 0x8a, 0x41, 0x79, 0x4c, 0x81, 0x2e, 0xbf, 0x02,
+	0x00, 0x00, 0xff, 0xff, 0x0a, 0xed, 0x44, 0x7f, 0xf4, 0x01, 0x00, 0x00,
 }

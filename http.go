@@ -18,14 +18,17 @@ package groupcache
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes"
 	"github.com/twitter/groupcache/consistenthash"
 	pb "github.com/twitter/groupcache/groupcachepb"
 )
@@ -183,7 +186,13 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST":
 		buf := new(bytes.Buffer)
 		buf.ReadFrom(r.Body)
-		err := group.Put(ctx, key, buf.Bytes())
+		var p putBody
+		err := json.Unmarshal(buf.Bytes(), &p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		err = group.Put(ctx, key, p.Value, p.TTL)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -211,6 +220,11 @@ type httpPeer struct {
 
 var bufferPool = sync.Pool{
 	New: func() interface{} { return new(bytes.Buffer) },
+}
+
+type putBody struct {
+	Value []byte
+	TTL   time.Duration
 }
 
 func (h *httpPeer) Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error {
@@ -257,7 +271,20 @@ func (h *httpPeer) Put(context Context, in *pb.PutRequest, out *pb.PutResponse) 
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
 	)
-	reader := bytes.NewReader(in.GetValue())
+	var d time.Duration
+	var err error
+	if in.GetTtl() != nil {
+		d, err = ptypes.Duration(in.GetTtl())
+		if err != nil {
+			return err
+		}
+	}
+	p := putBody{Value: in.GetValue(), TTL: d}
+	jb, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	reader := bytes.NewReader(jb)
 	req, err := http.NewRequest("POST", u, reader)
 	if err != nil {
 		return err

@@ -90,7 +90,7 @@ func TestHTTPPool(t *testing.T) {
 		return errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
-	putter := PutterFunc(func(ctx Context, key string, data []byte) error {
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
 		return errors.New("parent putter called; something's wrong")
 	})
 	g := NewGroup("httpPoolTest", 1<<20, getter, putter)
@@ -109,7 +109,8 @@ func TestHTTPPool(t *testing.T) {
 	// we can't verify the output from a child process easily, so just check for an error
 	for _, key := range testKeys(nPuts) {
 		value := []byte(key)
-		if err := g.Put(nil, key, value); err != nil {
+		ttl := 1 * time.Second
+		if err := g.Put(nil, key, value, ttl); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("Put key=%q, value=%q (peer:key)", key, value)
@@ -134,7 +135,7 @@ func beChildForTestHTTPPool() {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
 		return nil
 	})
-	putter := PutterFunc(func(ctx Context, key string, data []byte) error {
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
 		return nil
 	})
 	NewGroup("httpPoolTest", 1<<20, getter, putter)

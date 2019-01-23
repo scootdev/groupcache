@@ -32,7 +32,9 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/golang/protobuf/ptypes"
 	pb "github.com/twitter/groupcache/groupcachepb"
 	"github.com/twitter/groupcache/lru"
 	"github.com/twitter/groupcache/singleflight"
@@ -64,14 +66,16 @@ type Putter interface {
 	// Data cannot be invalidated - it is assumed that
 	// putting any data with a preexisting key can be
 	// interpreted as a no-op.
-	Put(ctx Context, key string, data []byte) error
+	// TTL is a duration value that will be
+	// passed through to any underlying PutterFunc.
+	Put(ctx Context, key string, data []byte, ttl time.Duration) error
 }
 
 // A PutterFunc implements Putter with a function.
-type PutterFunc func(ctx Context, key string, data []byte) error
+type PutterFunc func(ctx Context, key string, data []byte, ttl time.Duration) error
 
-func (f PutterFunc) Put(ctx Context, key string, data []byte) error {
-	return f(ctx, key, data)
+func (f PutterFunc) Put(ctx Context, key string, data []byte, ttl time.Duration) error {
+	return f(ctx, key, data, ttl)
 }
 
 // A GetterPutter combines the Getter and Putter interfaces.
@@ -341,8 +345,8 @@ func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error)
 
 func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, error) {
 	req := &pb.GetRequest{
-		Group: &g.name,
-		Key:   &key,
+		Group: g.name,
+		Key:   key,
 	}
 	res := &pb.GetResponse{}
 	err := peer.Get(ctx, req, res)
@@ -361,7 +365,7 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, 
 
 // Put functions
 
-func (g *Group) Put(ctx Context, key string, data []byte) error {
+func (g *Group) Put(ctx Context, key string, data []byte, ttl time.Duration) error {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Puts.Add(1)
 	if data == nil {
@@ -374,7 +378,7 @@ func (g *Group) Put(ctx Context, key string, data []byte) error {
 		return nil
 	}
 
-	err := g.store(ctx, key, data)
+	err := g.store(ctx, key, data, ttl)
 	if err != nil {
 		return err
 	}
@@ -382,7 +386,7 @@ func (g *Group) Put(ctx Context, key string, data []byte) error {
 }
 
 // underlying Put logic - stores data for key either by invoking the putter locally or by sending it to another machine.
-func (g *Group) store(ctx Context, key string, data []byte) (err error) {
+func (g *Group) store(ctx Context, key string, data []byte, ttl time.Duration) (err error) {
 	g.Stats.Stores.Add(1)
 	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
 		// Deduplication checks - see explanation in load()
@@ -393,14 +397,14 @@ func (g *Group) store(ctx Context, key string, data []byte) (err error) {
 		g.Stats.StoresDeduped.Add(1)
 		var err error
 		if peer, ok := g.peers.PickPeer(key); ok {
-			err = g.putFromPeer(ctx, peer, key, data)
+			err = g.putFromPeer(ctx, peer, key, data, ttl)
 			if err == nil {
 				g.Stats.PeerStores.Add(1)
 				return nil, nil
 			}
 			g.Stats.PeerErrors.Add(1)
 		}
-		err = g.putLocally(ctx, key, data)
+		err = g.putLocally(ctx, key, data, ttl)
 		if err != nil {
 			g.Stats.LocalStoreErrs.Add(1)
 			return nil, err
@@ -413,15 +417,16 @@ func (g *Group) store(ctx Context, key string, data []byte) (err error) {
 	return
 }
 
-func (g *Group) putLocally(ctx Context, key string, data []byte) error {
-	return g.putter.Put(ctx, key, data)
+func (g *Group) putLocally(ctx Context, key string, data []byte, ttl time.Duration) error {
+	return g.putter.Put(ctx, key, data, ttl)
 }
 
-func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte) error {
+func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte, ttl time.Duration) error {
 	req := &pb.PutRequest{
-		Group: &g.name,
-		Key:   &key,
+		Group: g.name,
+		Key:   key,
 		Value: data,
+		Ttl:   ptypes.DurationProto(ttl),
 	}
 	res := &pb.PutResponse{}
 	err := peer.Put(ctx, req, res)
