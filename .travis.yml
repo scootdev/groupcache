@@ -1,5 +1,9 @@
 language: go
 
+os: linux
+dist: trusty
+sudo: false
+
 go:
   - "1.x"
 
