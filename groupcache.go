@@ -28,6 +28,7 @@ package groupcache
 
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"sync"
@@ -300,8 +301,10 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		// 1: fn()
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
+		// TODO LOGS IN VARIOUS CASES
 		if value, cacheHit := g.lookupCache(key); cacheHit {
 			g.Stats.CacheHits.Add(1)
+			fmt.Println("GROUPCACHE/GROUP.LOAD - Returning value from lookupCache")
 			return value, nil
 		}
 		g.Stats.LoadsDeduped.Add(1)
@@ -311,6 +314,7 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 			value, err = g.getFromPeer(ctx, peer, key)
 			if err == nil {
 				g.Stats.PeerLoads.Add(1)
+				fmt.Println("GROUPCACHE/GROUP.LOAD - Returning value from getFromPeer")
 				return value, nil
 			}
 			g.Stats.PeerErrors.Add(1)
@@ -327,10 +331,16 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		g.Stats.LocalLoads.Add(1)
 		destPopulated = true // only one caller of load gets this return value
 		g.populateCache(key, value, &g.mainCache)
+		fmt.Println("GROUPCACHE/GROUP.LOAD - Returning value from getLocally")
 		return value, nil
 	})
 	if err == nil {
-		value = viewi.(ByteView)
+		bv, ok := viewi.(ByteView)
+		if !ok {
+			err = errors.New("groupcache: failed interface conversion")
+		} else {
+			value = bv
+		}
 	}
 	return
 }

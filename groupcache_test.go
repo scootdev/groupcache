@@ -19,6 +19,7 @@ limitations under the License.
 package groupcache
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -36,8 +37,8 @@ import (
 )
 
 var (
-	once                    sync.Once
-	stringGroup, protoGroup GetterPutter
+	once                               sync.Once
+	stringGroup, protoGroup, byteGroup GetterPutter
 
 	stringc = make(chan string)
 
@@ -54,6 +55,7 @@ var (
 const (
 	stringGroupName = "string-group"
 	protoGroupName  = "proto-group"
+	byteGroupName   = "byte-group"
 	testMessageType = "google3/net/groupcache/go/test_proto.TestMessage"
 	fromChan        = "from-chan"
 	cacheSize       = 1 << 20
@@ -91,6 +93,25 @@ func testSetup() {
 				Name: proto.String("ECHO:" + key),
 				City: proto.String("SOME-CITY"),
 			})
+		}),
+		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cachePuts.Add(1)
+			return nil
+		}),
+	)
+
+	byteGroup = NewGroup(
+		byteGroupName,
+		cacheSize,
+		GetterFunc(func(_ Context, key string, dest Sink) error {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheFills.Add(1)
+			return dest.SetBytes([]byte("ECHO:" + key))
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
 			if key == fromChan {
@@ -400,6 +421,13 @@ func TestTruncatingByteSliceTarget(t *testing.T) {
 	if want := "ECHO:short"; string(s) != want {
 		t.Errorf("short key got %q; want %q", s, want)
 	}
+	s = buf[:]
+	if err := byteGroup.Get(dummyCtx, "short", TruncatingByteSliceSink(&s)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte("ECHO:short"); !bytes.Equal(s, want) {
+		t.Errorf("short key got %q; want %q", s, want)
+	}
 
 	s = buf[:6]
 	if err := stringGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
@@ -407,6 +435,26 @@ func TestTruncatingByteSliceTarget(t *testing.T) {
 	}
 	if want := "ECHO:t"; string(s) != want {
 		t.Errorf("truncated key got %q; want %q", s, want)
+	}
+	s = buf[:6]
+	if err := byteGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte("ECHO:t"); !bytes.Equal(s, want) {
+		t.Errorf("short key got %q; want %q", s, want)
+	}
+
+	s = []byte{}
+	dest := TruncatingByteSliceSink(&s)
+	if err := byteGroup.Get(dummyCtx, "truncated", dest); err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte{}; !bytes.Equal(s, want) {
+		t.Errorf("truncated key got %q; want %q", s, want)
+	}
+	_, err := dest.view()
+	if err != nil {
+		t.Errorf("error viewing trunceted sink: %s", err)
 	}
 }
 
