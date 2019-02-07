@@ -330,7 +330,12 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		return value, nil
 	})
 	if err == nil {
-		value = viewi.(ByteView)
+		bv, ok := viewi.(ByteView)
+		if !ok {
+			err = errors.New("groupcache: failed interface conversion")
+		} else {
+			value = bv
+		}
 	}
 	return
 }
