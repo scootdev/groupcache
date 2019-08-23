@@ -169,14 +169,20 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		var value []byte
-		err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+		expiration, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		expirationTimestamp, err := ptypes.TimestampProto(*expiration)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.GetResponse{Value: value})
+		body, err := proto.Marshal(&pb.GetResponse{Value: value, Expiration: expirationTimestamp})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

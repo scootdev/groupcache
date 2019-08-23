@@ -86,8 +86,8 @@ func TestHTTPPool(t *testing.T) {
 	// Dummy getter function. Gets should go to children only.
 	// The only time this process will handle a get is when the
 	// children can't be contacted for some reason.
-	getter := GetterFunc(func(ctx Context, key string, dest Sink) error {
-		return errors.New("parent getter called; something's wrong")
+	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
+		return &expiration, errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
@@ -97,7 +97,7 @@ func TestHTTPPool(t *testing.T) {
 
 	for _, key := range testKeys(nGets) {
 		var value string
-		if err := g.Get(nil, key, StringSink(&value)); err != nil {
+		if _, err := g.Get(nil, key, StringSink(&value)); err != nil {
 			t.Fatal(err)
 		}
 		if suffix := ":" + key; !strings.HasSuffix(value, suffix) {
@@ -131,9 +131,9 @@ func beChildForTestHTTPPool() {
 	p := NewHTTPPool("http://" + addrs[*peerIndex])
 	p.Set(addrToURL(addrs)...)
 
-	getter := GetterFunc(func(ctx Context, key string, dest Sink) error {
+	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
-		return nil
+		return &expiration, nil
 	})
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
 		return nil

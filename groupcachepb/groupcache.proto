@@ -19,6 +19,7 @@ syntax = "proto3";
 package groupcachepb;
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 message GetRequest {
   string group = 1;
@@ -28,6 +29,7 @@ message GetRequest {
 message GetResponse {
   bytes value = 1;
   double minute_qps = 2;
+  google.protobuf.Timestamp expiration = 3;
 }
 
 message PutRequest {

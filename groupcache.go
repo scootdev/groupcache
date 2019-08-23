@@ -48,13 +48,13 @@ type Getter interface {
 	// uniquely describe the loaded data, without an implicit
 	// current time, and without relying on cache expiration
 	// mechanisms.
-	Get(ctx Context, key string, dest Sink) error
+	Get(ctx Context, key string, dest Sink) (*time.Time, error)
 }
 
 // A GetterFunc implements Getter with a function.
-type GetterFunc func(ctx Context, key string, dest Sink) error
+type GetterFunc func(ctx Context, key string, dest Sink) (*time.Time, error)
 
-func (f GetterFunc) Get(ctx Context, key string, dest Sink) error {
+func (f GetterFunc) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 	return f(ctx, key, dest)
 }
 
@@ -247,17 +247,17 @@ func (g *Group) initPeers() {
 
 // Get functions
 
-func (g *Group) Get(ctx Context, key string, dest Sink) error {
+func (g *Group) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Gets.Add(1)
 	if dest == nil {
-		return errors.New("groupcache: nil dest Sink")
+		return nil, errors.New("groupcache: nil dest Sink")
 	}
-	value, cacheHit := g.lookupCache(key)
+	value, expiration, cacheHit := g.lookupCache(key)
 
 	if cacheHit {
 		g.Stats.CacheHits.Add(1)
-		return setSinkView(dest, value)
+		return expiration, setSinkView(dest, value)
 	}
 
 	// Optimization to avoid double unmarshalling or copying: keep
@@ -265,18 +265,23 @@ func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	// (if local) will set this; the losers will not. The common
 	// case will likely be one caller.
 	destPopulated := false
-	value, destPopulated, err := g.load(ctx, key, dest)
+	value, destPopulated, expiration, err := g.load(ctx, key, dest)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if destPopulated {
-		return nil
+		return expiration, nil
 	}
-	return setSinkView(dest, value)
+	return expiration, setSinkView(dest, value)
+}
+
+type loadResult struct {
+	value      ByteView
+	expiration *time.Time
 }
 
 // underlying Get logic - loads key either by invoking the getter locally or by sending it to another machine.
-func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
+func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPopulated bool, expiration *time.Time, err error) {
 	g.Stats.Loads.Add(1)
 	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
 		// Check the cache again because singleflight can only dedup calls
@@ -300,18 +305,19 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		// 1: fn()
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
-		if value, cacheHit := g.lookupCache(key); cacheHit {
+		if value, expiration, cacheHit := g.lookupCache(key); cacheHit {
 			g.Stats.CacheHits.Add(1)
-			return value, nil
+			return loadResult{value: value, expiration: expiration}, nil
 		}
 		g.Stats.LoadsDeduped.Add(1)
 		var value ByteView
+		var expiration *time.Time
 		var err error
 		if peer, ok := g.peers.PickPeer(key); ok {
-			value, err = g.getFromPeer(ctx, peer, key)
+			value, expiration, err = g.getFromPeer(ctx, peer, key)
 			if err == nil {
 				g.Stats.PeerLoads.Add(1)
-				return value, nil
+				return loadResult{value: value, expiration: expiration}, nil
 			}
 			g.Stats.PeerErrors.Add(1)
 			// TODO(bradfitz): log the peer's error? keep
@@ -319,36 +325,38 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 			// probably boring (normal task movement), so not
 			// worth logging I imagine.
 		}
-		value, err = g.getLocally(ctx, key, dest)
+		value, expiration, err = g.getLocally(ctx, key, dest)
 		if err != nil {
 			g.Stats.LocalLoadErrs.Add(1)
 			return nil, err
 		}
 		g.Stats.LocalLoads.Add(1)
 		destPopulated = true // only one caller of load gets this return value
-		g.populateCache(key, value, &g.mainCache)
-		return value, nil
+		g.populateCache(key, value, &g.mainCache, expiration)
+		return loadResult{value: value, expiration: expiration}, nil
 	})
 	if err == nil {
-		bv, ok := viewi.(ByteView)
+		lr, ok := viewi.(loadResult)
 		if !ok {
 			err = errors.New("groupcache: failed interface conversion")
 		} else {
-			value = bv
+			value = lr.value
+			expiration = lr.expiration
 		}
 	}
 	return
 }
 
-func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error) {
-	err := g.getter.Get(ctx, key, dest)
+func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, *time.Time, error) {
+	expiration, err := g.getter.Get(ctx, key, dest)
 	if err != nil {
-		return ByteView{}, err
+		return ByteView{}, nil, err
 	}
-	return dest.view()
+	dv, err := dest.view()
+	return dv, expiration, err
 }
 
-func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, error) {
+func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, *time.Time, error) {
 	req := &pb.GetRequest{
 		Group: g.name,
 		Key:   key,
@@ -356,16 +364,21 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, 
 	res := &pb.GetResponse{}
 	err := peer.Get(ctx, req, res)
 	if err != nil {
-		return ByteView{}, err
+		return ByteView{}, nil, err
 	}
 	value := ByteView{b: res.Value}
+	expiration, err := ptypes.Timestamp(res.Expiration)
+	if err != nil {
+		return ByteView{}, nil, err
+	}
+	expiration = expiration.UTC()
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
 	if rand.Intn(10) == 0 {
-		g.populateCache(key, value, &g.hotCache)
+		g.populateCache(key, value, &g.hotCache, &expiration)
 	}
-	return value, nil
+	return value, &expiration, nil
 }
 
 // Put functions
@@ -376,7 +389,7 @@ func (g *Group) Put(ctx Context, key string, data []byte, ttl time.Duration) err
 	if data == nil {
 		return errors.New("groupcache: nil data")
 	}
-	_, cacheHit := g.lookupCache(key)
+	_, _, cacheHit := g.lookupCache(key)
 
 	if cacheHit {
 		g.Stats.CacheHits.Add(1)
@@ -395,7 +408,7 @@ func (g *Group) store(ctx Context, key string, data []byte, ttl time.Duration) (
 	g.Stats.Stores.Add(1)
 	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
 		// Deduplication checks - see explanation in load()
-		if _, cacheHit := g.lookupCache(key); cacheHit {
+		if _, _, cacheHit := g.lookupCache(key); cacheHit {
 			g.Stats.CacheHits.Add(1)
 			return nil, nil
 		}
@@ -416,7 +429,8 @@ func (g *Group) store(ctx Context, key string, data []byte, ttl time.Duration) (
 		}
 		g.Stats.LocalStores.Add(1)
 		value := ByteView{b: data}
-		g.populateCache(key, value, &g.mainCache)
+		expiration := time.Now().UTC().Add(ttl)
+		g.populateCache(key, value, &g.mainCache, &expiration)
 		return nil, nil
 	})
 	return
@@ -443,30 +457,31 @@ func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
 	if rand.Intn(10) == 0 {
-		g.populateCache(key, value, &g.hotCache)
+		expiration := time.Now().UTC().Add(ttl)
+		g.populateCache(key, value, &g.hotCache, &expiration)
 	}
 	return nil
 }
 
 // Cache utils
 
-func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
+func (g *Group) lookupCache(key string) (value ByteView, expiration *time.Time, ok bool) {
 	if g.cacheBytes <= 0 {
 		return
 	}
-	value, ok = g.mainCache.get(key)
+	value, expiration, ok = g.mainCache.get(key)
 	if ok {
 		return
 	}
-	value, ok = g.hotCache.get(key)
+	value, expiration, ok = g.hotCache.get(key)
 	return
 }
 
-func (g *Group) populateCache(key string, value ByteView, cache *cache) {
+func (g *Group) populateCache(key string, value ByteView, cache *cache, expiration *time.Time) {
 	if g.cacheBytes <= 0 {
 		return
 	}
-	cache.add(key, value)
+	cache.add(key, value, expiration)
 
 	// Evict items from cache(s) if necessary.
 	for {
@@ -522,6 +537,30 @@ type cache struct {
 	lru        *lru.Cache
 	nhit, nget int64
 	nevict     int64 // number of evictions
+	metadata   map[string]*cacheValueMetadata
+}
+
+type cacheValueMetadata struct {
+	expiration *time.Time
+}
+
+func (c *cache) getMetadata(key string) *cacheValueMetadata {
+	if c.metadata == nil {
+		c.metadata = make(map[string]*cacheValueMetadata)
+	}
+	m := c.metadata[key]
+	if m == nil {
+		m = &cacheValueMetadata{}
+		c.metadata[key] = m
+	}
+	return m
+}
+
+func (c *cacheValueMetadata) addExpiration(t *time.Time) {
+	if t != nil {
+		utc := (*t).UTC()
+		c.expiration = &utc
+	}
 }
 
 func (c *cache) stats() CacheStats {
@@ -536,13 +575,15 @@ func (c *cache) stats() CacheStats {
 	}
 }
 
-func (c *cache) add(key string, value ByteView) {
+func (c *cache) add(key string, value ByteView, expiration *time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.getMetadata(key).addExpiration(expiration)
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
 				val := value.(ByteView)
+				delete(c.metadata, key.(string))
 				c.nbytes -= int64(len(key.(string))) + int64(val.Len())
 				c.nevict++
 			},
@@ -552,11 +593,14 @@ func (c *cache) add(key string, value ByteView) {
 	c.nbytes += int64(len(key)) + int64(value.Len())
 }
 
-func (c *cache) get(key string) (value ByteView, ok bool) {
+func (c *cache) get(key string) (value ByteView, expiration *time.Time, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nget++
 	if c.lru == nil {
+		return
+	}
+	if expiration = c.getMetadata(key).expiration; expiration != nil && expiration.Before(time.Now().UTC()) {
 		return
 	}
 	vi, ok := c.lru.Get(key)
@@ -564,7 +608,7 @@ func (c *cache) get(key string) (value ByteView, ok bool) {
 		return
 	}
 	c.nhit++
-	return vi.(ByteView), true
+	return vi.(ByteView), expiration, true
 }
 
 func (c *cache) removeOldest() {

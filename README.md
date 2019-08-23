@@ -31,9 +31,9 @@ For API docs and examples, see http://godoc.org/github.com/golang/groupcache
    the loaded value to all callers.
 
  * does not support versioned values.  If key "foo" is value "bar",
-   key "foo" must always be "bar".  There are neither cache expiration
-   times, nor explicit cache evictions.  Thus there is also no CAS,
-   nor Increment/Decrement.  This also means that groupcache....
+   key "foo" must always be "bar".  There are no explicit cache evictions.
+   Thus there is also no CAS, nor Increment/Decrement.
+   This also means that groupcache....
 
  * ... supports automatic mirroring of super-hot items to multiple
    processes.  This prevents memcached hot spotting where a machine's
