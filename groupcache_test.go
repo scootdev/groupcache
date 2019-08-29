@@ -50,8 +50,8 @@ var (
 	// cacheFills function.
 	cacheFills AtomicInt
 	// like cacheFills, but for the group's Putter
-	cachePuts  AtomicInt
-	expiration = time.Now().UTC().Add(time.Hour)
+	cachePuts AtomicInt
+	ttl       = time.Now().UTC().Add(time.Hour)
 )
 
 const (
@@ -72,9 +72,9 @@ func testSetup() {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return &expiration, dest.SetString("ECHO:" + key)
+			return &ttl, dest.SetString("ECHO:" + key)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -91,12 +91,12 @@ func testSetup() {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return &expiration, dest.SetProto(&testpb.TestMessage{
+			return &ttl, dest.SetProto(&testpb.TestMessage{
 				Name: proto.String("ECHO:" + key),
 				City: proto.String("SOME-CITY"),
 			})
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -113,9 +113,9 @@ func testSetup() {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return &expiration, dest.SetBytes([]byte("ECHO:" + key))
+			return &ttl, dest.SetBytes([]byte("ECHO:" + key))
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -240,13 +240,60 @@ func TestCaching(t *testing.T) {
 	// puts
 	puts := countPuts(func() {
 		for i := 0; i < 10; i++ {
-			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value"), 1*time.Second); err != nil {
+			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value"), &ttl); err != nil {
 				t.Fatal(err)
 			}
 		}
 	})
 	if puts != 1 {
 		t.Errorf("expected 1 cache put; got %d", puts)
+	}
+}
+
+func TestResourceExpiration(t *testing.T) {
+	expiredKey := "expiredKey"
+	unexpiredKey := "unexpiredKey"
+	expiredTTL := time.Now().Add(-1 * time.Hour)
+	testval := "test"
+	g := newGroup(
+		"expiretestgroup",
+		1024,
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
+			if key == expiredKey {
+				return nil, errors.New("404 Not Found")
+			}
+			return &ttl, dest.SetString(testval)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
+			return nil
+		}),
+		nil,
+	)
+	if err := g.Put(dummyCtx, expiredKey, []byte("TestCaching-value"), &expiredTTL); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Put(dummyCtx, unexpiredKey, []byte("TestCaching-value"), &ttl); err != nil {
+		t.Fatal(err)
+	}
+
+	fills1 := countFills(func() {
+		var s string
+		if _, err := g.Get(dummyCtx, expiredKey, StringSink(&s)); err == nil {
+			t.Fatal("Expired Resources should return error")
+		}
+	})
+	if fills1 != 0 {
+		t.Errorf("expected 0 cache fill; got %d", fills1)
+	}
+
+	fills2 := countFills(func() {
+		var s string
+		if _, err := g.Get(dummyCtx, unexpiredKey, StringSink(&s)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if fills2 != 0 {
+		t.Errorf("expected 0 cache fill; got %d", fills2)
 	}
 }
 
@@ -301,8 +348,8 @@ func (p *fakePeer) Get(_ Context, in *pb.GetRequest, out *pb.GetResponse) error 
 		return errors.New("simulated error from peer")
 	}
 	out.Value = []byte("got:" + in.GetKey())
-	expiration, _ := ptypes.TimestampProto(expiration)
-	out.Expiration = expiration
+	ttl, _ := ptypes.TimestampProto(ttl)
+	out.Ttl = ttl
 	return nil
 }
 
@@ -336,9 +383,9 @@ func TestPeers(t *testing.T) {
 	localHits := 0
 	getter := func(_ Context, key string, dest Sink) (*time.Time, error) {
 		localHits++
-		return &expiration, dest.SetString("got:" + key)
+		return &ttl, dest.SetString("got:" + key)
 	}
-	putter := func(_ Context, key string, data []byte, ttl time.Duration) error {
+	putter := func(_ Context, key string, data []byte, ttl *time.Time) error {
 		localHits++
 		return nil
 	}
@@ -355,8 +402,7 @@ func TestPeers(t *testing.T) {
 			key := fmt.Sprintf("key-%d", j)
 			want := "got:" + key
 			value := []byte(want)
-			ttl := 1 * time.Second
-			err := testGroup.Put(dummyCtx, key, value, ttl)
+			err := testGroup.Put(dummyCtx, key, value, &ttl)
 			if err != nil {
 				t.Errorf("%s: error on key %q: %v", name, key, err)
 				continue
@@ -513,9 +559,9 @@ func TestNoDedup(t *testing.T) {
 		"testgroup",
 		1024,
 		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
-			return &expiration, dest.SetString(testval)
+			return &ttl, dest.SetString(testval)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil
 		}),
 		nil,

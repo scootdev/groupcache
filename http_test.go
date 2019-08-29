@@ -87,10 +87,10 @@ func TestHTTPPool(t *testing.T) {
 	// The only time this process will handle a get is when the
 	// children can't be contacted for some reason.
 	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
-		return &expiration, errors.New("parent getter called; something's wrong")
+		return &ttl, errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
-	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return errors.New("parent putter called; something's wrong")
 	})
 	g := NewGroup("httpPoolTest", cacheSize, getter, putter)
@@ -109,8 +109,7 @@ func TestHTTPPool(t *testing.T) {
 	// we can't verify the output from a child process easily, so just check for an error
 	for _, key := range testKeys(nPuts) {
 		value := []byte(key)
-		ttl := 1 * time.Second
-		if err := g.Put(nil, key, value, ttl); err != nil {
+		if err := g.Put(nil, key, value, &ttl); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("Put key=%q, value=%q (peer:key)", key, value)
@@ -133,9 +132,9 @@ func beChildForTestHTTPPool() {
 
 	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
-		return &expiration, nil
+		return &ttl, nil
 	})
-	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return nil
 	})
 	NewGroup("httpPoolTest", cacheSize, getter, putter)
