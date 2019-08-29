@@ -50,7 +50,8 @@ var (
 	// cacheFills function.
 	cacheFills AtomicInt
 	// like cacheFills, but for the group's Putter
-	cachePuts AtomicInt
+	cachePuts  AtomicInt
+	expiration = time.Now().UTC().Add(time.Hour)
 )
 
 const (
@@ -61,8 +62,6 @@ const (
 	fromChan        = "from-chan"
 	cacheSize       = 1 << 20
 )
-
-var expiration = time.Now().UTC().Add(time.Hour)
 
 func testSetup() {
 	stringGroup = NewGroup(

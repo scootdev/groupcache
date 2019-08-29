@@ -93,7 +93,7 @@ func TestHTTPPool(t *testing.T) {
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
 		return errors.New("parent putter called; something's wrong")
 	})
-	g := NewGroup("httpPoolTest", 1<<20, getter, putter)
+	g := NewGroup("httpPoolTest", cacheSize, getter, putter)
 
 	for _, key := range testKeys(nGets) {
 		var value string
@@ -138,7 +138,7 @@ func beChildForTestHTTPPool() {
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
 		return nil
 	})
-	NewGroup("httpPoolTest", 1<<20, getter, putter)
+	NewGroup("httpPoolTest", cacheSize, getter, putter)
 
 	log.Fatal(http.ListenAndServe(addrs[*peerIndex], p))
 }
