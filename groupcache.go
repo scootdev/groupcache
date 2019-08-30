@@ -45,16 +45,15 @@ type Getter interface {
 	// Get returns the value identified by key, populating dest.
 	//
 	// The returned data must be unversioned. That is, key must
-	// uniquely describe the loaded data, without an implicit
-	// current time, and without relying on cache expiration
-	// mechanisms.
-	Get(ctx Context, key string, dest Sink) error
+	// uniquely describe the loaded data, without relying on
+	// cache expiration mechanisms.
+	Get(ctx Context, key string, dest Sink) (*time.Time, error)
 }
 
 // A GetterFunc implements Getter with a function.
-type GetterFunc func(ctx Context, key string, dest Sink) error
+type GetterFunc func(ctx Context, key string, dest Sink) (*time.Time, error)
 
-func (f GetterFunc) Get(ctx Context, key string, dest Sink) error {
+func (f GetterFunc) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 	return f(ctx, key, dest)
 }
 
@@ -68,13 +67,13 @@ type Putter interface {
 	// interpreted as a no-op.
 	// TTL is a duration value that will be
 	// passed through to any underlying PutterFunc.
-	Put(ctx Context, key string, data []byte, ttl time.Duration) error
+	Put(ctx Context, key string, data []byte, ttl *time.Time) error
 }
 
 // A PutterFunc implements Putter with a function.
-type PutterFunc func(ctx Context, key string, data []byte, ttl time.Duration) error
+type PutterFunc func(ctx Context, key string, data []byte, ttl *time.Time) error
 
-func (f PutterFunc) Put(ctx Context, key string, data []byte, ttl time.Duration) error {
+func (f PutterFunc) Put(ctx Context, key string, data []byte, ttl *time.Time) error {
 	return f(ctx, key, data, ttl)
 }
 
@@ -90,7 +89,10 @@ var (
 
 	initPeerServerOnce sync.Once
 	initPeerServer     func()
+	errResourceExpired = errors.New("resource is expired")
 )
+
+const populateHotCacheOdds = 10
 
 // GetGroup returns the named group previously created with NewGroup, or
 // nil if there's no such group.
@@ -247,17 +249,17 @@ func (g *Group) initPeers() {
 
 // Get functions
 
-func (g *Group) Get(ctx Context, key string, dest Sink) error {
+func (g *Group) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Gets.Add(1)
 	if dest == nil {
-		return errors.New("groupcache: nil dest Sink")
+		return nil, errors.New("groupcache: nil dest Sink")
 	}
-	value, cacheHit := g.lookupCache(key)
+	payload, cacheHit := g.lookupCache(key)
 
 	if cacheHit {
 		g.Stats.CacheHits.Add(1)
-		return setSinkView(dest, value)
+		return payload.ttl, setSinkView(dest, payload.value)
 	}
 
 	// Optimization to avoid double unmarshalling or copying: keep
@@ -265,18 +267,24 @@ func (g *Group) Get(ctx Context, key string, dest Sink) error {
 	// (if local) will set this; the losers will not. The common
 	// case will likely be one caller.
 	destPopulated := false
-	value, destPopulated, err := g.load(ctx, key, dest)
+	payload, destPopulated, err := g.load(ctx, key, dest)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if destPopulated {
-		return nil
+		return payload.ttl, nil
 	}
-	return setSinkView(dest, value)
+	return payload.ttl, setSinkView(dest, payload.value)
+}
+
+// payload encapsulates the value cached and the ttl time for the value
+type payload struct {
+	value ByteView
+	ttl   *time.Time
 }
 
 // underlying Get logic - loads key either by invoking the getter locally or by sending it to another machine.
-func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
+func (g *Group) load(ctx Context, key string, dest Sink) (p payload, destPopulated bool, err error) {
 	g.Stats.Loads.Add(1)
 	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
 		// Check the cache again because singleflight can only dedup calls
@@ -300,18 +308,18 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 		// 1: fn()
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
-		if value, cacheHit := g.lookupCache(key); cacheHit {
+		if p, cacheHit := g.lookupCache(key); cacheHit {
 			g.Stats.CacheHits.Add(1)
-			return value, nil
+			return p, nil
 		}
 		g.Stats.LoadsDeduped.Add(1)
-		var value ByteView
+		var p payload
 		var err error
 		if peer, ok := g.peers.PickPeer(key); ok {
-			value, err = g.getFromPeer(ctx, peer, key)
+			p, err = g.getFromPeer(ctx, peer, key)
 			if err == nil {
 				g.Stats.PeerLoads.Add(1)
-				return value, nil
+				return p, nil
 			}
 			g.Stats.PeerErrors.Add(1)
 			// TODO(bradfitz): log the peer's error? keep
@@ -319,36 +327,39 @@ func (g *Group) load(ctx Context, key string, dest Sink) (value ByteView, destPo
 			// probably boring (normal task movement), so not
 			// worth logging I imagine.
 		}
-		value, err = g.getLocally(ctx, key, dest)
+		p, err = g.getLocally(ctx, key, dest)
 		if err != nil {
 			g.Stats.LocalLoadErrs.Add(1)
 			return nil, err
 		}
 		g.Stats.LocalLoads.Add(1)
 		destPopulated = true // only one caller of load gets this return value
-		g.populateCache(key, value, &g.mainCache)
-		return value, nil
+		g.populateCache(key, p, &g.mainCache)
+		return p, nil
 	})
 	if err == nil {
-		bv, ok := viewi.(ByteView)
+		var ok bool
+		p, ok = viewi.(payload)
 		if !ok {
 			err = errors.New("groupcache: failed interface conversion")
-		} else {
-			value = bv
 		}
 	}
 	return
 }
 
-func (g *Group) getLocally(ctx Context, key string, dest Sink) (ByteView, error) {
-	err := g.getter.Get(ctx, key, dest)
+func (g *Group) getLocally(ctx Context, key string, dest Sink) (payload, error) {
+	ttl, err := g.getter.Get(ctx, key, dest)
 	if err != nil {
-		return ByteView{}, err
+		return payload{}, err
 	}
-	return dest.view()
+	if ttl.Before(time.Now().UTC()) {
+		return payload{}, errResourceExpired
+	}
+	dv, err := dest.view()
+	return payload{value: dv, ttl: ttl}, err
 }
 
-func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, error) {
+func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, error) {
 	req := &pb.GetRequest{
 		Group: g.name,
 		Key:   key,
@@ -356,21 +367,30 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (ByteView, 
 	res := &pb.GetResponse{}
 	err := peer.Get(ctx, req, res)
 	if err != nil {
-		return ByteView{}, err
+		return payload{}, err
 	}
 	value := ByteView{b: res.Value}
+	ttl, err := ptypes.Timestamp(res.Ttl)
+	if err != nil {
+		return payload{}, err
+	}
+	ttl = ttl.UTC()
+	if ttl.Before(time.Now().UTC()) {
+		return payload{}, errResourceExpired
+	}
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
-	if rand.Intn(10) == 0 {
-		g.populateCache(key, value, &g.hotCache)
+	payload := payload{value: value, ttl: &ttl}
+	if rand.Intn(populateHotCacheOdds) == 0 {
+		g.populateCache(key, payload, &g.hotCache)
 	}
-	return value, nil
+	return payload, nil
 }
 
 // Put functions
 
-func (g *Group) Put(ctx Context, key string, data []byte, ttl time.Duration) error {
+func (g *Group) Put(ctx Context, key string, data []byte, ttl *time.Time) error {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Puts.Add(1)
 	if data == nil {
@@ -391,7 +411,7 @@ func (g *Group) Put(ctx Context, key string, data []byte, ttl time.Duration) err
 }
 
 // underlying Put logic - stores data for key either by invoking the putter locally or by sending it to another machine.
-func (g *Group) store(ctx Context, key string, data []byte, ttl time.Duration) (err error) {
+func (g *Group) store(ctx Context, key string, data []byte, ttl *time.Time) (err error) {
 	g.Stats.Stores.Add(1)
 	_, err = g.loadGroup.Do(key, func() (interface{}, error) {
 		// Deduplication checks - see explanation in load()
@@ -416,57 +436,61 @@ func (g *Group) store(ctx Context, key string, data []byte, ttl time.Duration) (
 		}
 		g.Stats.LocalStores.Add(1)
 		value := ByteView{b: data}
-		g.populateCache(key, value, &g.mainCache)
+		g.populateCache(key, payload{value: value, ttl: ttl}, &g.mainCache)
 		return nil, nil
 	})
 	return
 }
 
-func (g *Group) putLocally(ctx Context, key string, data []byte, ttl time.Duration) error {
+func (g *Group) putLocally(ctx Context, key string, data []byte, ttl *time.Time) error {
 	return g.putter.Put(ctx, key, data, ttl)
 }
 
-func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte, ttl time.Duration) error {
+func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte, ttl *time.Time) error {
+	ttlProto, err := ptypes.TimestampProto(*ttl)
+	if err != nil {
+		return err
+	}
 	req := &pb.PutRequest{
 		Group: g.name,
 		Key:   key,
 		Value: data,
-		Ttl:   ptypes.DurationProto(ttl),
+		Ttl:   ttlProto,
 	}
 	res := &pb.PutResponse{}
-	err := peer.Put(ctx, req, res)
+	err = peer.Put(ctx, req, res)
 	if err != nil {
 		return err
 	}
-	value := ByteView{b: data}
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
-	if rand.Intn(10) == 0 {
-		g.populateCache(key, value, &g.hotCache)
+	if rand.Intn(populateHotCacheOdds) == 0 {
+		payload := payload{value: ByteView{b: data}, ttl: ttl}
+		g.populateCache(key, payload, &g.hotCache)
 	}
 	return nil
 }
 
 // Cache utils
 
-func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
+func (g *Group) lookupCache(key string) (payload payload, ok bool) {
 	if g.cacheBytes <= 0 {
 		return
 	}
-	value, ok = g.mainCache.get(key)
+	payload, ok = g.mainCache.get(key)
 	if ok {
 		return
 	}
-	value, ok = g.hotCache.get(key)
+	payload, ok = g.hotCache.get(key)
 	return
 }
 
-func (g *Group) populateCache(key string, value ByteView, cache *cache) {
+func (g *Group) populateCache(key string, payload payload, cache *cache) {
 	if g.cacheBytes <= 0 {
 		return
 	}
-	cache.add(key, value)
+	cache.add(key, payload)
 
 	// Evict items from cache(s) if necessary.
 	for {
@@ -522,6 +546,33 @@ type cache struct {
 	lru        *lru.Cache
 	nhit, nget int64
 	nevict     int64 // number of evictions
+	metadata   map[string]*cacheValueMetadata
+}
+
+// cacheValueMetadata is metadata for values in the cache.
+// This structure was chosen so that it could hold additional
+// fields in the future.
+type cacheValueMetadata struct {
+	ttl *time.Time
+}
+
+func (c *cache) getMetadata(key string) *cacheValueMetadata {
+	if c.metadata == nil {
+		c.metadata = make(map[string]*cacheValueMetadata)
+	}
+	m := c.metadata[key]
+	if m == nil {
+		m = &cacheValueMetadata{}
+		c.metadata[key] = m
+	}
+	return m
+}
+
+func (c *cacheValueMetadata) addTtl(t *time.Time) {
+	if t != nil {
+		utc := (*t).UTC()
+		c.ttl = &utc
+	}
 }
 
 func (c *cache) stats() CacheStats {
@@ -536,27 +587,33 @@ func (c *cache) stats() CacheStats {
 	}
 }
 
-func (c *cache) add(key string, value ByteView) {
+func (c *cache) add(key string, payload payload) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.getMetadata(key).addTtl(payload.ttl)
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
 				val := value.(ByteView)
+				delete(c.metadata, key.(string))
 				c.nbytes -= int64(len(key.(string))) + int64(val.Len())
 				c.nevict++
 			},
 		}
 	}
-	c.lru.Add(key, value)
-	c.nbytes += int64(len(key)) + int64(value.Len())
+	c.lru.Add(key, payload.value)
+	c.nbytes += int64(len(key)) + int64(payload.value.Len())
 }
 
-func (c *cache) get(key string) (value ByteView, ok bool) {
+func (c *cache) get(key string) (p payload, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nget++
 	if c.lru == nil {
+		return
+	}
+	var ttl *time.Time
+	if ttl = c.getMetadata(key).ttl; ttl != nil && ttl.Before(time.Now().UTC()) {
 		return
 	}
 	vi, ok := c.lru.Get(key)
@@ -564,7 +621,8 @@ func (c *cache) get(key string) (value ByteView, ok bool) {
 		return
 	}
 	c.nhit++
-	return vi.(ByteView), true
+	p = payload{value: vi.(ByteView), ttl: ttl}
+	return p, true
 }
 
 func (c *cache) removeOldest() {

@@ -169,14 +169,20 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		var value []byte
-		err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+		ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		ttlTimestamp, err := ptypes.TimestampProto(*ttl)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.GetResponse{Value: value})
+		body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -192,7 +198,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		err = group.Put(ctx, key, p.Value, p.TTL)
+		err = group.Put(ctx, key, p.Value, &p.TTL)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -224,7 +230,7 @@ var bufferPool = sync.Pool{
 
 type putBody struct {
 	Value []byte
-	TTL   time.Duration
+	TTL   time.Time
 }
 
 func (h *httpPeer) Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error {
@@ -271,15 +277,15 @@ func (h *httpPeer) Put(context Context, in *pb.PutRequest, out *pb.PutResponse) 
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
 	)
-	var d time.Duration
+	var ttl time.Time
 	var err error
 	if in.GetTtl() != nil {
-		d, err = ptypes.Duration(in.GetTtl())
+		ttl, err = ptypes.Timestamp(in.GetTtl())
 		if err != nil {
 			return err
 		}
 	}
-	p := putBody{Value: in.GetValue(), TTL: d}
+	p := putBody{Value: in.GetValue(), TTL: ttl}
 	jb, err := json.Marshal(p)
 	if err != nil {
 		return err

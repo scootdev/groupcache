@@ -86,18 +86,18 @@ func TestHTTPPool(t *testing.T) {
 	// Dummy getter function. Gets should go to children only.
 	// The only time this process will handle a get is when the
 	// children can't be contacted for some reason.
-	getter := GetterFunc(func(ctx Context, key string, dest Sink) error {
-		return errors.New("parent getter called; something's wrong")
+	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
+		return &ttl, errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
-	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return errors.New("parent putter called; something's wrong")
 	})
-	g := NewGroup("httpPoolTest", 1<<20, getter, putter)
+	g := NewGroup("httpPoolTest", cacheSize, getter, putter)
 
 	for _, key := range testKeys(nGets) {
 		var value string
-		if err := g.Get(nil, key, StringSink(&value)); err != nil {
+		if _, err := g.Get(nil, key, StringSink(&value)); err != nil {
 			t.Fatal(err)
 		}
 		if suffix := ":" + key; !strings.HasSuffix(value, suffix) {
@@ -109,8 +109,7 @@ func TestHTTPPool(t *testing.T) {
 	// we can't verify the output from a child process easily, so just check for an error
 	for _, key := range testKeys(nPuts) {
 		value := []byte(key)
-		ttl := 1 * time.Second
-		if err := g.Put(nil, key, value, ttl); err != nil {
+		if err := g.Put(nil, key, value, &ttl); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("Put key=%q, value=%q (peer:key)", key, value)
@@ -131,14 +130,14 @@ func beChildForTestHTTPPool() {
 	p := NewHTTPPool("http://" + addrs[*peerIndex])
 	p.Set(addrToURL(addrs)...)
 
-	getter := GetterFunc(func(ctx Context, key string, dest Sink) error {
+	getter := GetterFunc(func(ctx Context, key string, dest Sink) (*time.Time, error) {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
+		return &ttl, nil
+	})
+	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return nil
 	})
-	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl time.Duration) error {
-		return nil
-	})
-	NewGroup("httpPoolTest", 1<<20, getter, putter)
+	NewGroup("httpPoolTest", cacheSize, getter, putter)
 
 	log.Fatal(http.ListenAndServe(addrs[*peerIndex], p))
 }

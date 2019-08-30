@@ -31,6 +31,7 @@ import (
 	"unsafe"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes"
 
 	pb "github.com/twitter/groupcache/groupcachepb"
 	testpb "github.com/twitter/groupcache/testpb"
@@ -50,6 +51,7 @@ var (
 	cacheFills AtomicInt
 	// like cacheFills, but for the group's Putter
 	cachePuts AtomicInt
+	ttl       = time.Now().UTC().Add(time.Hour)
 )
 
 const (
@@ -65,14 +67,14 @@ func testSetup() {
 	stringGroup = NewGroup(
 		stringGroupName,
 		cacheSize,
-		GetterFunc(func(_ Context, key string, dest Sink) error {
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return dest.SetString("ECHO:" + key)
+			return &ttl, dest.SetString("ECHO:" + key)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -84,17 +86,17 @@ func testSetup() {
 	protoGroup = NewGroup(
 		protoGroupName,
 		cacheSize,
-		GetterFunc(func(_ Context, key string, dest Sink) error {
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return dest.SetProto(&testpb.TestMessage{
+			return &ttl, dest.SetProto(&testpb.TestMessage{
 				Name: proto.String("ECHO:" + key),
 				City: proto.String("SOME-CITY"),
 			})
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -106,14 +108,14 @@ func testSetup() {
 	byteGroup = NewGroup(
 		byteGroupName,
 		cacheSize,
-		GetterFunc(func(_ Context, key string, dest Sink) error {
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheFills.Add(1)
-			return dest.SetBytes([]byte("ECHO:" + key))
+			return &ttl, dest.SetBytes([]byte("ECHO:" + key))
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
 			}
@@ -134,7 +136,7 @@ func TestGetDupSuppressString(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			var s string
-			if err := stringGroup.Get(dummyCtx, fromChan, StringSink(&s)); err != nil {
+			if _, err := stringGroup.Get(dummyCtx, fromChan, StringSink(&s)); err != nil {
 				resc <- "ERROR:" + err.Error()
 				return
 			}
@@ -176,7 +178,7 @@ func TestGetDupSuppressProto(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			tm := new(testpb.TestMessage)
-			if err := protoGroup.Get(dummyCtx, fromChan, ProtoSink(tm)); err != nil {
+			if _, err := protoGroup.Get(dummyCtx, fromChan, ProtoSink(tm)); err != nil {
 				tm.Name = proto.String("ERROR:" + err.Error())
 			}
 			resc <- tm
@@ -227,7 +229,7 @@ func TestCaching(t *testing.T) {
 	fills := countFills(func() {
 		for i := 0; i < 10; i++ {
 			var s string
-			if err := stringGroup.Get(dummyCtx, "TestCaching-key1", StringSink(&s)); err != nil {
+			if _, err := stringGroup.Get(dummyCtx, "TestCaching-key1", StringSink(&s)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -238,7 +240,7 @@ func TestCaching(t *testing.T) {
 	// puts
 	puts := countPuts(func() {
 		for i := 0; i < 10; i++ {
-			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value"), 1*time.Second); err != nil {
+			if err := stringGroup.Put(dummyCtx, "TestCaching-key2", []byte("TestCaching-value"), &ttl); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -248,13 +250,60 @@ func TestCaching(t *testing.T) {
 	}
 }
 
+func TestResourceExpiration(t *testing.T) {
+	expiredKey := "expiredKey"
+	unexpiredKey := "unexpiredKey"
+	expiredTTL := time.Now().Add(-1 * time.Hour)
+	testval := "test"
+	g := newGroup(
+		"expiretestgroup",
+		1024,
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
+			if key == expiredKey {
+				return &expiredTTL, nil
+			}
+			return &ttl, dest.SetString(testval)
+		}),
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
+			return nil
+		}),
+		nil,
+	)
+	if err := g.Put(dummyCtx, expiredKey, []byte("TestCaching-value"), &expiredTTL); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Put(dummyCtx, unexpiredKey, []byte("TestCaching-value"), &ttl); err != nil {
+		t.Fatal(err)
+	}
+
+	fills1 := countFills(func() {
+		var s string
+		if _, err := g.Get(dummyCtx, expiredKey, StringSink(&s)); err == nil {
+			t.Fatal("Expired Resources should return error")
+		}
+	})
+	if fills1 != 0 {
+		t.Errorf("expected 0 cache fill; got %d", fills1)
+	}
+
+	fills2 := countFills(func() {
+		var s string
+		if _, err := g.Get(dummyCtx, unexpiredKey, StringSink(&s)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if fills2 != 0 {
+		t.Errorf("expected 0 cache fill; got %d", fills2)
+	}
+}
+
 func TestCacheEviction(t *testing.T) {
 	once.Do(testSetup)
 	testKey := "TestCacheEviction-key"
 	getTestKey := func() {
 		var res string
 		for i := 0; i < 10; i++ {
-			if err := stringGroup.Get(dummyCtx, testKey, StringSink(&res)); err != nil {
+			if _, err := stringGroup.Get(dummyCtx, testKey, StringSink(&res)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -299,6 +348,8 @@ func (p *fakePeer) Get(_ Context, in *pb.GetRequest, out *pb.GetResponse) error 
 		return errors.New("simulated error from peer")
 	}
 	out.Value = []byte("got:" + in.GetKey())
+	ttl, _ := ptypes.TimestampProto(ttl)
+	out.Ttl = ttl
 	return nil
 }
 
@@ -330,11 +381,11 @@ func TestPeers(t *testing.T) {
 	peerList := fakePeers([]ProtoPeer{peer0, peer1, peer2, nil})
 	const cacheSize = 0 // disabled
 	localHits := 0
-	getter := func(_ Context, key string, dest Sink) error {
+	getter := func(_ Context, key string, dest Sink) (*time.Time, error) {
 		localHits++
-		return dest.SetString("got:" + key)
+		return &ttl, dest.SetString("got:" + key)
 	}
-	putter := func(_ Context, key string, data []byte, ttl time.Duration) error {
+	putter := func(_ Context, key string, data []byte, ttl *time.Time) error {
 		localHits++
 		return nil
 	}
@@ -351,8 +402,7 @@ func TestPeers(t *testing.T) {
 			key := fmt.Sprintf("key-%d", j)
 			want := "got:" + key
 			value := []byte(want)
-			ttl := 1 * time.Second
-			err := testGroup.Put(dummyCtx, key, value, ttl)
+			err := testGroup.Put(dummyCtx, key, value, &ttl)
 			if err != nil {
 				t.Errorf("%s: error on key %q: %v", name, key, err)
 				continue
@@ -363,7 +413,7 @@ func TestPeers(t *testing.T) {
 			key := fmt.Sprintf("key-%d", i)
 			want := "got:" + key
 			var got string
-			err := testGroup.Get(dummyCtx, key, StringSink(&got))
+			_, err := testGroup.Get(dummyCtx, key, StringSink(&got))
 			if err != nil {
 				t.Errorf("%s: error on key %q: %v", name, key, err)
 				continue
@@ -415,14 +465,14 @@ func TestPeers(t *testing.T) {
 func TestTruncatingByteSliceTarget(t *testing.T) {
 	var buf [100]byte
 	s := buf[:]
-	if err := stringGroup.Get(dummyCtx, "short", TruncatingByteSliceSink(&s)); err != nil {
+	if _, err := stringGroup.Get(dummyCtx, "short", TruncatingByteSliceSink(&s)); err != nil {
 		t.Fatal(err)
 	}
 	if want := "ECHO:short"; string(s) != want {
 		t.Errorf("short key got %q; want %q", s, want)
 	}
 	s = buf[:]
-	if err := byteGroup.Get(dummyCtx, "short", TruncatingByteSliceSink(&s)); err != nil {
+	if _, err := byteGroup.Get(dummyCtx, "short", TruncatingByteSliceSink(&s)); err != nil {
 		t.Fatal(err)
 	}
 	if want := []byte("ECHO:short"); !bytes.Equal(s, want) {
@@ -430,14 +480,14 @@ func TestTruncatingByteSliceTarget(t *testing.T) {
 	}
 
 	s = buf[:6]
-	if err := stringGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
+	if _, err := stringGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
 		t.Fatal(err)
 	}
 	if want := "ECHO:t"; string(s) != want {
 		t.Errorf("truncated key got %q; want %q", s, want)
 	}
 	s = buf[:6]
-	if err := byteGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
+	if _, err := byteGroup.Get(dummyCtx, "truncated", TruncatingByteSliceSink(&s)); err != nil {
 		t.Fatal(err)
 	}
 	if want := []byte("ECHO:t"); !bytes.Equal(s, want) {
@@ -446,7 +496,7 @@ func TestTruncatingByteSliceTarget(t *testing.T) {
 
 	s = []byte{}
 	dest := TruncatingByteSliceSink(&s)
-	if err := byteGroup.Get(dummyCtx, "truncated", dest); err != nil {
+	if _, err := byteGroup.Get(dummyCtx, "truncated", dest); err != nil {
 		t.Fatal(err)
 	}
 	if want := []byte{}; !bytes.Equal(s, want) {
@@ -508,10 +558,10 @@ func TestNoDedup(t *testing.T) {
 	g := newGroup(
 		"testgroup",
 		1024,
-		GetterFunc(func(_ Context, key string, dest Sink) error {
-			return dest.SetString(testval)
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
+			return &ttl, dest.SetString(testval)
 		}),
-		PutterFunc(func(_ Context, key string, data []byte, ttl time.Duration) error {
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil
 		}),
 		nil,
@@ -534,7 +584,7 @@ func TestNoDedup(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			var s string
-			if err := g.Get(dummyCtx, testkey, StringSink(&s)); err != nil {
+			if _, err := g.Get(dummyCtx, testkey, StringSink(&s)); err != nil {
 				resc <- "ERROR:" + err.Error()
 				return
 			}
