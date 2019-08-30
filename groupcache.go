@@ -462,12 +462,11 @@ func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte
 	if err != nil {
 		return err
 	}
-	value := ByteView{b: data}
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
 	if rand.Intn(populateHotCacheOdds) == 0 {
-		payload := payload{value: value, ttl: ttl}
+		payload := payload{value: ByteView{b: data}, ttl: ttl}
 		g.populateCache(key, payload, &g.hotCache)
 	}
 	return nil
