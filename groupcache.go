@@ -89,6 +89,7 @@ var (
 
 	initPeerServerOnce sync.Once
 	initPeerServer     func()
+	errResourceExpired = errors.New("resource is expired")
 )
 
 const populateHotCacheOdds = 10
@@ -351,6 +352,9 @@ func (g *Group) getLocally(ctx Context, key string, dest Sink) (payload, error) 
 	if err != nil {
 		return payload{}, err
 	}
+	if ttl.Before(time.Now().UTC()) {
+		return payload{}, errResourceExpired
+	}
 	dv, err := dest.view()
 	return payload{value: dv, ttl: ttl}, err
 }
@@ -371,6 +375,9 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, e
 		return payload{}, err
 	}
 	ttl = ttl.UTC()
+	if ttl.Before(time.Now().UTC()) {
+		return payload{}, errResourceExpired
+	}
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.

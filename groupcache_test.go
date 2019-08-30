@@ -260,7 +260,7 @@ func TestResourceExpiration(t *testing.T) {
 		1024,
 		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			if key == expiredKey {
-				return nil, errors.New("404 Not Found")
+				return &expiredTTL, nil
 			}
 			return &ttl, dest.SetString(testval)
 		}),
