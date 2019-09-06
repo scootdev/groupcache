@@ -29,6 +29,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+	tspb "github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/twitter/groupcache/consistenthash"
 	pb "github.com/twitter/groupcache/groupcachepb"
 )
@@ -175,10 +176,13 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		ttlTimestamp, err := ptypes.TimestampProto(*ttl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		var ttlTimestamp *tspb.Timestamp = nil
+		if ttl != nil {
+			ttlTimestamp, err = ptypes.TimestampProto(*ttl)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Write the value to the response body as a proto message.
@@ -198,7 +202,11 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		err = group.Put(ctx, key, p.Value, &p.TTL)
+		var ttl *time.Time = nil
+		if p.HasTTL {
+			ttl = &p.TTL
+		}
+		err = group.Put(ctx, key, p.Value, ttl)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -228,9 +236,12 @@ var bufferPool = sync.Pool{
 	New: func() interface{} { return new(bytes.Buffer) },
 }
 
+// putBody encapsulates groupcache data for peer to peer put messages.
+// The TTL field should only be used if HasTTL is true.
 type putBody struct {
-	Value []byte
-	TTL   time.Time
+	Value  []byte
+	HasTTL bool
+	TTL    time.Time
 }
 
 func (h *httpPeer) Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error {
@@ -278,14 +289,16 @@ func (h *httpPeer) Put(context Context, in *pb.PutRequest, out *pb.PutResponse) 
 		url.QueryEscape(in.GetKey()),
 	)
 	var ttl time.Time
+	hasTTL := false
 	var err error
 	if in.GetTtl() != nil {
 		ttl, err = ptypes.Timestamp(in.GetTtl())
 		if err != nil {
 			return err
 		}
+		hasTTL = true
 	}
-	p := putBody{Value: in.GetValue(), TTL: ttl}
+	p := putBody{Value: in.GetValue(), HasTTL: hasTTL, TTL: ttl}
 	jb, err := json.Marshal(p)
 	if err != nil {
 		return err
