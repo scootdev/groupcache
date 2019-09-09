@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes"
+	tspb "github.com/golang/protobuf/ptypes/timestamp"
 	pb "github.com/twitter/groupcache/groupcachepb"
 	"github.com/twitter/groupcache/lru"
 	"github.com/twitter/groupcache/singleflight"
@@ -352,7 +353,7 @@ func (g *Group) getLocally(ctx Context, key string, dest Sink) (payload, error) 
 	if err != nil {
 		return payload{}, err
 	}
-	if ttl.Before(time.Now().UTC()) {
+	if ttl != nil && ttl.Before(time.Now().UTC()) {
 		return payload{}, errResourceExpired
 	}
 	dv, err := dest.view()
@@ -369,19 +370,23 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, e
 	if err != nil {
 		return payload{}, err
 	}
-	value := ByteView{b: res.Value}
-	ttl, err := ptypes.Timestamp(res.Ttl)
-	if err != nil {
-		return payload{}, err
+	value := ByteView{b: res.GetValue()}
+	var ttlp *time.Time = nil
+	if res.GetTtl() != nil {
+		ttl, err := ptypes.Timestamp(res.GetTtl())
+		if err != nil {
+			return payload{}, err
+		}
+		ttl = ttl.UTC()
+		if ttl.Before(time.Now().UTC()) {
+			return payload{}, errResourceExpired
+		}
+		ttlp = &ttl
 	}
-	ttl = ttl.UTC()
-	if ttl.Before(time.Now().UTC()) {
-		return payload{}, errResourceExpired
-	}
+	payload := payload{value: value, ttl: ttlp}
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
-	payload := payload{value: value, ttl: &ttl}
 	if rand.Intn(populateHotCacheOdds) == 0 {
 		g.populateCache(key, payload, &g.hotCache)
 	}
@@ -447,9 +452,13 @@ func (g *Group) putLocally(ctx Context, key string, data []byte, ttl *time.Time)
 }
 
 func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte, ttl *time.Time) error {
-	ttlProto, err := ptypes.TimestampProto(*ttl)
-	if err != nil {
-		return err
+	var ttlProto *tspb.Timestamp = nil
+	var err error
+	if ttl != nil {
+		ttlProto, err = ptypes.TimestampProto(*ttl)
+		if err != nil {
+			return err
+		}
 	}
 	req := &pb.PutRequest{
 		Group: g.name,
