@@ -44,9 +44,10 @@ func TestHTTPPool(t *testing.T) {
 	}
 
 	const (
-		nChild = 4
-		nGets  = 100
-		nPuts  = 100
+		nChild    = 4
+		nGets     = 100
+		nContains = 100
+		nPuts     = 100
 	)
 
 	var childAddr []string
@@ -90,10 +91,14 @@ func TestHTTPPool(t *testing.T) {
 		return &ttl, errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
+	container := ContainerFunc(func(ctx Context, key string) (*Metadata, error) {
+		return nil, errors.New("parent container called; something's wrong")
+	})
+	// Dummy putter function
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return errors.New("parent putter called; something's wrong")
 	})
-	g := NewGroup("httpPoolTest", cacheSize, getter, putter)
+	g := NewGroup("httpPoolTest", cacheSize, getter, container, putter)
 
 	for _, key := range testKeys(nGets) {
 		var value string
@@ -104,6 +109,14 @@ func TestHTTPPool(t *testing.T) {
 			t.Errorf("Get(%q) = %q, want value ending in %q", key, value, suffix)
 		}
 		t.Logf("Get key=%q, value=%q (peer:key)", key, value)
+	}
+
+	for _, key := range testKeys(nContains) {
+		md, err := g.Contain(nil, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Contain key=%q, metadata=%q (peer:key)", key, md)
 	}
 
 	// we can't verify the output from a child process easily, so just check for an error
@@ -134,10 +147,14 @@ func beChildForTestHTTPPool() {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
 		return &ttl, nil
 	})
+	container := ContainerFunc(func(ctx Context, key string) (*Metadata, error) {
+		length := len(strconv.Itoa(*peerIndex) + ":" + key)
+		return &Metadata{Length: int64(length), TTL: &ttl}, nil
+	})
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return nil
 	})
-	NewGroup("httpPoolTest", cacheSize, getter, putter)
+	NewGroup("httpPoolTest", cacheSize, getter, container, putter)
 
 	log.Fatal(http.ListenAndServe(addrs[*peerIndex], p))
 }

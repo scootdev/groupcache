@@ -31,6 +31,17 @@ message GetResponse {
   google.protobuf.Timestamp ttl = 3;
 }
 
+message ContainRequest {
+  string group = 1;
+  string key = 2; // not actually required/guaranteed to be UTF-8
+}
+
+message ContainResponse {
+  double minute_qps = 1;
+  google.protobuf.Timestamp ttl = 2;
+  int64 length = 3;
+}
+
 message PutRequest {
   string group = 1;
   string key = 2; // not actually required/guaranteed to be UTF-8
@@ -44,5 +55,6 @@ message PutResponse {
 
 service GroupCache {
   rpc Get(GetRequest) returns (GetResponse) {};
+  rpc Contain(ContainRequest) returns (ContainResponse) {};
   rpc Put(PutRequest) returns (PutResponse) {};
 }
