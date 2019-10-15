@@ -250,6 +250,7 @@ type Stats struct {
 	Puts           AtomicInt // any Put request, including from peers
 	Contains       AtomicInt // any Contain request, including from peers
 	CacheHits      AtomicInt // either cache was good
+	MetaCacheHits  AtomicInt // either metadata cache was good
 	Loads          AtomicInt // Gets not from the cache
 	LoadsDeduped   AtomicInt // after singleflight
 	LocalLoads     AtomicInt // total good local loads
@@ -444,10 +445,9 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, e
 func (g *Group) Contain(ctx Context, key string) (*Metadata, error) {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Contains.Add(1)
-
 	md := g.checkCache(key)
-
 	if md != nil {
+		g.Stats.MetaCacheHits.Add(1)
 		return md, nil
 	}
 
@@ -474,7 +474,7 @@ func (g *Group) check(ctx Context, key string) (md *Metadata, destPopulated bool
 		// Deduplication checks - see explanation in load()
 		mdTemp := g.checkCache(key)
 		if mdTemp != nil {
-			// TODO(apratti): Fix g.Stats.CacheHits.Add(1)
+			g.Stats.MetaCacheHits.Add(1)
 			return mdTemp, nil
 		}
 		g.Stats.ChecksDeduped.Add(1)
@@ -499,8 +499,9 @@ func (g *Group) check(ctx Context, key string) (md *Metadata, destPopulated bool
 		}
 		g.Stats.LocalChecks.Add(1)
 		destPopulated = true // only one caller of load gets this return value
-		g.populateCacheMetadata(key, md, &g.mainCache)
-
+		if md != nil {
+			g.populateCacheMetadata(key, md, &g.mainCache)
+		}
 		return md, nil
 	})
 	if err == nil {
@@ -517,6 +518,9 @@ func (g *Group) checkLocally(ctx Context, key string) (*Metadata, error) {
 	md, err := g.container.Contain(ctx, key)
 	if err != nil {
 		return nil, err
+	}
+	if md == nil {
+		return nil, nil
 	}
 	if md.TTL != nil && md.TTL.Before(time.Now().UTC()) {
 		return nil, errResourceExpired
