@@ -166,9 +166,34 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = p.Context(r)
 	}
 	group.Stats.ServerRequests.Add(1)
-	// TODO(apratti): Test this more thoroughly
 	switch r.Method {
 	case "GET":
+		if _, ok := r.URL.Query()["exist"]; ok {
+			md, err := group.Contain(ctx, key)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			var ttlTimestamp *tspb.Timestamp
+			if md.TTL != nil {
+				ttlTimestamp, err = ptypes.TimestampProto(*md.TTL)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+
+			// Write the value to the response body as a proto message.
+			body, err := proto.Marshal(&pb.ContainResponse{Length: md.Length, Ttl: ttlTimestamp})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.Write(body)
+			return
+		}
 		var value []byte
 		ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
 		if err != nil {
@@ -187,30 +212,6 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Write the value to the response body as a proto message.
 		body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(body)
-	case "HEAD":
-		md, err := group.Contain(ctx, key)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var ttlTimestamp *tspb.Timestamp
-		if md.TTL != nil {
-			ttlTimestamp, err = ptypes.TimestampProto(*md.TTL)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.ContainResponse{Length: md.Length, Ttl: ttlTimestamp})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -307,12 +308,12 @@ func (h *httpPeer) Get(context Context, in *pb.GetRequest, out *pb.GetResponse) 
 
 func (h *httpPeer) Contain(context Context, in *pb.ContainRequest, out *pb.ContainResponse) error {
 	u := fmt.Sprintf(
-		"%v%v/%v",
+		"%v%v/%v?exist",
 		h.baseURL,
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
 	)
-	req, err := http.NewRequest("HEAD", u, nil)
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return err
 	}
