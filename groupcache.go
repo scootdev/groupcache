@@ -538,6 +538,9 @@ func (g *Group) checkFromPeer(ctx Context, peer ProtoPeer, key string) (*Metadat
 	if err != nil {
 		return nil, err
 	}
+	if !res.Exists {
+		return nil, nil
+	}
 	md := &Metadata{Length: res.GetLength()}
 	if res.GetTtl() != nil {
 		ttl, err := ptypes.Timestamp(res.GetTtl())
@@ -666,7 +669,7 @@ func (g *Group) checkCache(key string) *Metadata {
 func (g *Group) populateCacheMetadata(key string, md *Metadata, cache *cache) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	cache.getMetadata(key).addTtl(md.TTL).addLength(md.Length)
+	cache.getMetadata(key).addExists(true).addTtl(md.TTL).addLength(md.Length)
 }
 
 func (g *Group) populateCache(key string, payload payload, cache *cache) {
@@ -736,12 +739,9 @@ type cache struct {
 // This structure was chosen so that it could hold additional
 // fields in the future.
 type cacheValueMetadata struct {
+	exists bool
 	ttl    *time.Time
 	length int64
-}
-
-func (c *cache) containsMetadata(key string) bool {
-	return c.metadata[key] != nil
 }
 
 func (c *cache) getMetadata(key string) *cacheValueMetadata {
@@ -754,6 +754,11 @@ func (c *cache) getMetadata(key string) *cacheValueMetadata {
 		c.metadata[key] = m
 	}
 	return m
+}
+
+func (c *cacheValueMetadata) addExists(e bool) *cacheValueMetadata {
+	c.exists = e
+	return c
 }
 
 func (c *cacheValueMetadata) addTtl(t *time.Time) *cacheValueMetadata {
@@ -784,7 +789,7 @@ func (c *cache) stats() CacheStats {
 func (c *cache) add(key string, payload payload) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.getMetadata(key).addTtl(payload.TTL).addLength(int64(payload.value.Len()))
+	c.getMetadata(key).addExists(true).addTtl(payload.TTL).addLength(int64(payload.value.Len()))
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
@@ -806,8 +811,12 @@ func (c *cache) get(key string) (p payload, ok bool) {
 	if c.lru == nil {
 		return
 	}
+	md := c.getMetadata(key)
+	if !md.exists {
+		return
+	}
 	var ttl *time.Time
-	if ttl = c.getMetadata(key).ttl; ttl != nil && ttl.Before(time.Now().UTC()) {
+	if ttl = md.ttl; ttl != nil && ttl.Before(time.Now().UTC()) {
 		return
 	}
 	vi, ok := c.lru.Get(key)
@@ -823,7 +832,7 @@ func (c *cache) check(key string) *Metadata {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// TODO(apratti): Investigate this
-	if exists := c.containsMetadata(key); !exists {
+	if exists := c.getMetadata(key).exists; !exists {
 		return nil
 	}
 	//TODO(apratti): Fix this weird two metadatas

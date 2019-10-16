@@ -174,18 +174,22 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-
-			var ttlTimestamp *tspb.Timestamp
-			if md.TTL != nil {
-				ttlTimestamp, err = ptypes.TimestampProto(*md.TTL)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
+			resp := &pb.ContainResponse{}
+			if md != nil {
+				if md.TTL != nil {
+					ttlTimestamp, err := ptypes.TimestampProto(*md.TTL)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					resp.Ttl = ttlTimestamp
 				}
+				resp.Exists = true
+				resp.Length = md.Length
 			}
 
 			// Write the value to the response body as a proto message.
-			body, err := proto.Marshal(&pb.ContainResponse{Length: md.Length, Ttl: ttlTimestamp})
+			body, err := proto.Marshal(resp)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
