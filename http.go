@@ -142,6 +142,92 @@ func (p *HTTPPool) PickPeer(key string) (ProtoPeer, bool) {
 	return nil, false
 }
 
+func handleGet(ctx Context, w http.ResponseWriter, group *Group, key string) {
+	var value []byte
+	ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var ttlTimestamp *tspb.Timestamp = nil
+	if ttl != nil {
+		ttlTimestamp, err = ptypes.TimestampProto(*ttl)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
+func handleContain(ctx Context, w http.ResponseWriter, group *Group, key string) {
+	md, err := group.Contain(ctx, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := &pb.ContainResponse{}
+	if md != nil {
+		if md.TTL != nil {
+			ttlTimestamp, err := ptypes.TimestampProto(*md.TTL)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			resp.Ttl = ttlTimestamp
+		}
+		resp.Exists = true
+		resp.Length = md.Length
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
+func handlePut(ctx Context, w http.ResponseWriter, group *Group, key string, reqBody io.ReadCloser) {
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(reqBody)
+	var p putBody
+	err := json.Unmarshal(buf.Bytes(), &p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var ttl *time.Time = nil
+	if p.HasTTL {
+		ttl = &p.TTL
+	}
+	err = group.Put(ctx, key, p.Value, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(&pb.PutResponse{})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
 func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse request.
 	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
@@ -169,86 +255,12 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		if _, ok := r.URL.Query()["exist"]; ok {
-			md, err := group.Contain(ctx, key)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			resp := &pb.ContainResponse{}
-			if md != nil {
-				if md.TTL != nil {
-					ttlTimestamp, err := ptypes.TimestampProto(*md.TTL)
-					if err != nil {
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-						return
-					}
-					resp.Ttl = ttlTimestamp
-				}
-				resp.Exists = true
-				resp.Length = md.Length
-			}
-
-			// Write the value to the response body as a proto message.
-			body, err := proto.Marshal(resp)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/x-protobuf")
-			w.Write(body)
+			handleContain(ctx, w, group, key)
 			return
 		}
-		var value []byte
-		ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var ttlTimestamp *tspb.Timestamp = nil
-		if ttl != nil {
-			ttlTimestamp, err = ptypes.TimestampProto(*ttl)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(body)
+		handleGet(ctx, w, group, key)
 	case "POST":
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(r.Body)
-		var p putBody
-		err := json.Unmarshal(buf.Bytes(), &p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		var ttl *time.Time = nil
-		if p.HasTTL {
-			ttl = &p.TTL
-		}
-		err = group.Put(ctx, key, p.Value, ttl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.PutResponse{})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(body)
+		handlePut(ctx, w, group, key, r.Body)
 	default:
 		http.Error(w, fmt.Sprintf("unsuported method: %s", r.Method), http.StatusBadRequest)
 		return
