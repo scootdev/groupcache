@@ -669,7 +669,10 @@ func (g *Group) checkCache(key string) *Metadata {
 func (g *Group) populateCacheMetadata(key string, md *Metadata, cache *cache) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	cache.getMetadata(key).addExists(true).addTtl(md.TTL).addLength(md.Length)
+	cmd := cache.getMetadata(key)
+	cmd.setExists(true)
+	cmd.setTTL(md.TTL)
+	cmd.setLength(md.Length)
 }
 
 func (g *Group) populateCache(key string, payload payload, cache *cache) {
@@ -756,22 +759,19 @@ func (c *cache) getMetadata(key string) *cacheValueMetadata {
 	return m
 }
 
-func (c *cacheValueMetadata) addExists(e bool) *cacheValueMetadata {
+func (c *cacheValueMetadata) setExists(e bool) {
 	c.exists = e
-	return c
 }
 
-func (c *cacheValueMetadata) addTtl(t *time.Time) *cacheValueMetadata {
+func (c *cacheValueMetadata) setTTL(t *time.Time) {
 	if t != nil {
 		utc := (*t).UTC()
 		c.ttl = &utc
 	}
-	return c
 }
 
-func (c *cacheValueMetadata) addLength(l int64) *cacheValueMetadata {
+func (c *cacheValueMetadata) setLength(l int64) {
 	c.length = l
-	return c
 }
 
 func (c *cache) stats() CacheStats {
@@ -789,7 +789,10 @@ func (c *cache) stats() CacheStats {
 func (c *cache) add(key string, payload payload) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.getMetadata(key).addExists(true).addTtl(payload.TTL).addLength(int64(payload.value.Len()))
+	md := c.getMetadata(key)
+	md.setExists(true)
+	md.setTTL(payload.TTL)
+	md.setLength(int64(payload.value.Len()))
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
@@ -831,11 +834,9 @@ func (c *cache) get(key string) (p payload, ok bool) {
 func (c *cache) check(key string) *Metadata {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// TODO(apratti): Investigate this
 	if exists := c.getMetadata(key).exists; !exists {
 		return nil
 	}
-	//TODO(apratti): Fix this weird two metadatas
 	cvmd := c.getMetadata(key)
 	md := &Metadata{Length: cvmd.length, TTL: cvmd.ttl}
 	return md
