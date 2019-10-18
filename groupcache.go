@@ -316,17 +316,13 @@ type Metadata struct {
 	TTL    *time.Time
 }
 
-func NewMetadata(length int64, ttl *time.Time) Metadata {
-	return Metadata{Length: length, TTL: ttl}
-}
-
 // payload encapsulates the value cached and the ttl time for the value
 type payload struct {
 	*Metadata
 	value ByteView
 }
 
-func NewPayload(value ByteView, ttl *time.Time) payload {
+func newPayload(value ByteView, ttl *time.Time) payload {
 	md := &Metadata{TTL: ttl, Length: int64(value.Len())}
 	return payload{md, value}
 }
@@ -404,7 +400,7 @@ func (g *Group) getLocally(ctx Context, key string, dest Sink) (payload, error) 
 		return payload{}, errResourceExpired
 	}
 	dv, err := dest.view()
-	return NewPayload(dv, ttl), err
+	return newPayload(dv, ttl), err
 }
 
 func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, error) {
@@ -430,7 +426,7 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, e
 		}
 		ttlp = &ttl
 	}
-	payload := NewPayload(value, ttlp)
+	payload := newPayload(value, ttlp)
 	// TODO(bradfitz): use res.MinuteQps or something smart to
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
@@ -604,7 +600,7 @@ func (g *Group) store(ctx Context, key string, data []byte, ttl *time.Time) (err
 		}
 		g.Stats.LocalStores.Add(1)
 		value := ByteView{b: data}
-		g.populateCache(key, NewPayload(value, ttl), &g.mainCache)
+		g.populateCache(key, newPayload(value, ttl), &g.mainCache)
 		return nil, nil
 	})
 	return
@@ -638,7 +634,7 @@ func (g *Group) putFromPeer(ctx Context, peer ProtoPeer, key string, data []byte
 	// conditionally populate hotCache.  For now just do it some
 	// percentage of the time.
 	if rand.Intn(populateHotCacheOdds) == 0 {
-		payload := NewPayload(ByteView{b: data}, ttl)
+		payload := newPayload(ByteView{b: data}, ttl)
 		g.populateCache(key, payload, &g.hotCache)
 	}
 	return nil
@@ -827,7 +823,7 @@ func (c *cache) get(key string) (p payload, ok bool) {
 		return
 	}
 	c.nhit++
-	p = NewPayload(vi.(ByteView), ttl)
+	p = newPayload(vi.(ByteView), ttl)
 	return p, true
 }
 
