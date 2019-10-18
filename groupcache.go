@@ -61,13 +61,13 @@ func (f GetterFunc) Get(ctx Context, key string, dest Sink) (*time.Time, error) 
 // A Container checks if underlying data exists.
 type Container interface {
 	// Contain returns metadata on the underlying data.
-	Contain(ctx Context, key string) (*Metadata, error)
+	Contain(ctx Context, key string) (bool, error)
 }
 
 // A ContainerFunc implements Container with a function.
-type ContainerFunc func(ctx Context, key string) (*Metadata, error)
+type ContainerFunc func(ctx Context, key string) (bool, error)
 
-func (f ContainerFunc) Contain(ctx Context, key string) (*Metadata, error) {
+func (f ContainerFunc) Contain(ctx Context, key string) (bool, error) {
 	return f(ctx, key)
 }
 
@@ -249,7 +249,6 @@ type Stats struct {
 	Puts           AtomicInt // any Put request, including from peers
 	Contains       AtomicInt // any Contain request, including from peers
 	CacheHits      AtomicInt // either cache was good
-	MetaCacheHits  AtomicInt // either metadata cache was good
 	Loads          AtomicInt // Gets not from the cache
 	LoadsDeduped   AtomicInt // after singleflight
 	LocalLoads     AtomicInt // total good local loads
@@ -292,7 +291,7 @@ func (g *Group) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 
 	if cacheHit {
 		g.Stats.CacheHits.Add(1)
-		return payload.TTL, setSinkView(dest, payload.value)
+		return payload.ttl, setSinkView(dest, payload.value)
 	}
 
 	// Optimization to avoid double unmarshalling or copying: keep
@@ -305,25 +304,20 @@ func (g *Group) Get(ctx Context, key string, dest Sink) (*time.Time, error) {
 		return nil, err
 	}
 	if destPopulated {
-		return payload.TTL, nil
+		return payload.ttl, nil
 	}
-	return payload.TTL, setSinkView(dest, payload.value)
-}
-
-type Metadata struct {
-	Length int64
-	TTL    *time.Time
+	return payload.ttl, setSinkView(dest, payload.value)
 }
 
 // payload encapsulates the value cached and the ttl time for the value
 type payload struct {
-	*Metadata
-	value ByteView
+	value  ByteView
+	length int64
+	ttl    *time.Time
 }
 
 func newPayload(value ByteView, ttl *time.Time) payload {
-	md := &Metadata{TTL: ttl, Length: int64(value.Len())}
-	return payload{md, value}
+	return payload{ttl: ttl, length: int64(value.Len()), value: value}
 }
 
 // underlying Get logic - loads key either by invoking the getter locally or by sending it to another machine.
@@ -437,13 +431,13 @@ func (g *Group) getFromPeer(ctx Context, peer ProtoPeer, key string) (payload, e
 
 // Contain functions
 
-func (g *Group) Contain(ctx Context, key string) (*Metadata, error) {
+func (g *Group) Contain(ctx Context, key string) (bool, error) {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Contains.Add(1)
-	md := g.checkCache(key)
-	if md != nil {
-		g.Stats.MetaCacheHits.Add(1)
-		return md, nil
+
+	if _, cacheHit := g.lookupCache(key); cacheHit {
+		g.Stats.CacheHits.Add(1)
+		return true, nil
 	}
 
 	// Optimization to avoid double unmarshalling or copying: keep
@@ -451,35 +445,30 @@ func (g *Group) Contain(ctx Context, key string) (*Metadata, error) {
 	// (if local) will set this; the losers will not. The common
 	// case will likely be one caller.
 	// destPopulated := false
-	md, destPopulated, err := g.check(ctx, key)
+	ok, _, err := g.check(ctx, key)
 	if err != nil {
-		return nil, err
+		return true, err
 	}
-
-	if destPopulated {
-		return md, nil
-	}
-	return md, nil
+	return ok, nil
 }
 
 // underlying Contain logic - checks if key exists locally or on another machine.
-func (g *Group) check(ctx Context, key string) (md *Metadata, destPopulated bool, err error) {
+func (g *Group) check(ctx Context, key string) (ok bool, destPopulated bool, err error) {
 	g.Stats.Checks.Add(1)
 	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
 		// Deduplication checks - see explanation in load()
-		mdTemp := g.checkCache(key)
-		if mdTemp != nil {
-			g.Stats.MetaCacheHits.Add(1)
-			return mdTemp, nil
+		if _, cacheHit := g.lookupCache(key); cacheHit {
+			g.Stats.CacheHits.Add(1)
+			return true, nil
 		}
 		g.Stats.ChecksDeduped.Add(1)
-		var md *Metadata
+		var ok bool
 		var err error
 		if peer, ok := g.peers.PickPeer(key); ok {
-			md, err = g.checkFromPeer(ctx, peer, key)
+			ok, err = g.checkFromPeer(ctx, peer, key)
 			if err == nil {
 				g.Stats.PeerChecks.Add(1)
-				return md, nil
+				return ok, nil
 			}
 			g.Stats.PeerErrors.Add(1)
 			// TODO(bradfitz): log the peer's error? keep
@@ -487,43 +476,34 @@ func (g *Group) check(ctx Context, key string) (md *Metadata, destPopulated bool
 			// probably boring (normal task movement), so not
 			// worth logging I imagine.
 		}
-		md, err = g.checkLocally(ctx, key)
+		ok, err = g.checkLocally(ctx, key)
 		if err != nil {
 			g.Stats.LocalCheckErrs.Add(1)
 			return nil, err
 		}
 		g.Stats.LocalChecks.Add(1)
 		destPopulated = true // only one caller of load gets this return value
-		if md != nil {
-			g.populateCacheMetadata(key, md, &g.mainCache)
-		}
-		return md, nil
+		return ok, nil
 	})
 	if err == nil {
-		var ok bool
-		md, ok = viewi.(*Metadata)
-		if !ok {
+		var castOK bool
+		ok, castOK = viewi.(bool)
+		if !castOK {
 			err = errors.New("groupcache: failed interface conversion")
 		}
 	}
 	return
 }
 
-func (g *Group) checkLocally(ctx Context, key string) (*Metadata, error) {
-	md, err := g.container.Contain(ctx, key)
+func (g *Group) checkLocally(ctx Context, key string) (bool, error) {
+	ok, err := g.container.Contain(ctx, key)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	if md == nil {
-		return nil, nil
-	}
-	if md.TTL != nil && md.TTL.Before(time.Now().UTC()) {
-		return nil, errResourceExpired
-	}
-	return md, nil
+	return ok, nil
 }
 
-func (g *Group) checkFromPeer(ctx Context, peer ProtoPeer, key string) (*Metadata, error) {
+func (g *Group) checkFromPeer(ctx Context, peer ProtoPeer, key string) (bool, error) {
 	req := &pb.ContainRequest{
 		Group: g.name,
 		Key:   key,
@@ -531,24 +511,9 @@ func (g *Group) checkFromPeer(ctx Context, peer ProtoPeer, key string) (*Metadat
 	res := &pb.ContainResponse{}
 	err := peer.Contain(ctx, req, res)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	if !res.Exists {
-		return nil, nil
-	}
-	md := &Metadata{Length: res.GetLength()}
-	if res.GetTtl() != nil {
-		ttl, err := ptypes.Timestamp(res.GetTtl())
-		if err != nil {
-			return nil, err
-		}
-		ttl = ttl.UTC()
-		if ttl.Before(time.Now().UTC()) {
-			return nil, errResourceExpired
-		}
-		md.TTL = &ttl
-	}
-	return md, nil
+	return res.Exists, nil
 }
 
 // Put functions
@@ -651,20 +616,6 @@ func (g *Group) lookupCache(key string) (payload payload, ok bool) {
 	}
 	payload, ok = g.hotCache.get(key)
 	return
-}
-
-func (g *Group) checkCache(key string) *Metadata {
-	md := g.mainCache.check(key)
-	if md == nil {
-		md = g.hotCache.check(key)
-	}
-	return md
-}
-
-func (g *Group) populateCacheMetadata(key string, md *Metadata, cache *cache) {
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	cache.updateMetadata(key, md.TTL, md.Length)
 }
 
 func (g *Group) populateCache(key string, payload payload, cache *cache) {
@@ -786,7 +737,7 @@ func (c *cache) stats() CacheStats {
 func (c *cache) add(key string, payload payload) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.updateMetadata(key, payload.TTL, int64(payload.value.Len()))
+	c.updateMetadata(key, payload.ttl, int64(payload.value.Len()))
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
@@ -823,18 +774,6 @@ func (c *cache) get(key string) (p payload, ok bool) {
 	c.nhit++
 	p = newPayload(vi.(ByteView), ttl)
 	return p, true
-}
-
-func (c *cache) check(key string) *Metadata {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cvmd := c.getMetadata(key)
-	if cvmd == nil {
-		return nil
-	}
-
-	md := &Metadata{Length: cvmd.length, TTL: cvmd.ttl}
-	return md
 }
 
 func (c *cache) removeOldest() {

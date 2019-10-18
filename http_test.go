@@ -91,8 +91,8 @@ func TestHTTPPool(t *testing.T) {
 		return &ttl, errors.New("parent getter called; something's wrong")
 	})
 	// Dummy putter function
-	container := ContainerFunc(func(ctx Context, key string) (*Metadata, error) {
-		return nil, errors.New("parent container called; something's wrong")
+	container := ContainerFunc(func(ctx Context, key string) (bool, error) {
+		return false, errors.New("parent container called; something's wrong")
 	})
 	// Dummy putter function
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
@@ -112,11 +112,11 @@ func TestHTTPPool(t *testing.T) {
 	}
 
 	for _, key := range testKeys(nContains) {
-		md, err := g.Contain(nil, key)
+		ok, err := g.Contain(nil, key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("Contain key=%q, metadata=%q (peer:key)", key, md)
+		t.Logf("Contain key=%q, ok=%t (peer:key)", key, ok)
 	}
 
 	// we can't verify the output from a child process easily, so just check for an error
@@ -147,9 +147,8 @@ func beChildForTestHTTPPool() {
 		dest.SetString(strconv.Itoa(*peerIndex) + ":" + key)
 		return &ttl, nil
 	})
-	container := ContainerFunc(func(ctx Context, key string) (*Metadata, error) {
-		length := len(strconv.Itoa(*peerIndex) + ":" + key)
-		return &Metadata{Length: int64(length), TTL: &ttl}, nil
+	container := ContainerFunc(func(ctx Context, key string) (bool, error) {
+		return true, nil
 	})
 	putter := PutterFunc(func(ctx Context, key string, data []byte, ttl *time.Time) error {
 		return nil

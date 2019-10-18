@@ -74,9 +74,8 @@ func newTestGroup(name, testval string) *Group {
 
 			return &ttl, dest.SetString(testval)
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
-			length := len(testval)
-			return &Metadata{Length: int64(length), TTL: &ttl}, nil
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil
@@ -96,12 +95,12 @@ func testSetup() {
 			cacheFills.Add(1)
 			return &ttl, dest.SetString("ECHO:" + key)
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
+		ContainerFunc(func(_ Context, key string) (bool, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheMeta.Add(1)
-			return &Metadata{TTL: &ttl}, nil
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
@@ -125,13 +124,12 @@ func testSetup() {
 				City: proto.String("SOME-CITY"),
 			})
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
+		ContainerFunc(func(_ Context, key string) (bool, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheMeta.Add(1)
-			//TODO(apratti): make length helpers
-			return &Metadata{TTL: &ttl}, nil
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
@@ -152,13 +150,12 @@ func testSetup() {
 			cacheFills.Add(1)
 			return &ttl, dest.SetBytes([]byte("ECHO:" + key))
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
+		ContainerFunc(func(_ Context, key string) (bool, error) {
 			if key == fromChan {
 				key = <-stringc
 			}
 			cacheMeta.Add(1)
-			length := len([]byte("ECHO:" + key))
-			return &Metadata{Length: int64(length), TTL: &ttl}, nil
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
@@ -315,13 +312,11 @@ func TestResourceExpiration(t *testing.T) {
 			}
 			return &ttl, dest.SetString(testval)
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
-			ttl := ttl
+		ContainerFunc(func(_ Context, key string) (bool, error) {
 			if key == expiredKey {
-				ttl = expiredTTL
+				return false, nil
 			}
-			length := len(testval)
-			return &Metadata{Length: int64(length), TTL: &ttl}, nil
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil
@@ -417,8 +412,6 @@ func (p *fakePeer) Contain(_ Context, in *pb.ContainRequest, out *pb.ContainResp
 	if p.fail {
 		return errors.New("simulated error from peer")
 	}
-	ttl, _ := ptypes.TimestampProto(ttl)
-	out.Ttl = ttl
 	return nil
 }
 
@@ -454,10 +447,9 @@ func TestPeers(t *testing.T) {
 		localHits++
 		return &ttl, dest.SetString("got:" + key)
 	}
-	container := func(_ Context, key string) (*Metadata, error) {
+	container := func(_ Context, key string) (bool, error) {
 		localHits++
-		length := len("got:" + key)
-		return &Metadata{Length: int64(length), TTL: &ttl}, nil
+		return true, nil
 	}
 	putter := func(_ Context, key string, data []byte, ttl *time.Time) error {
 		localHits++
@@ -635,9 +627,8 @@ func TestNoDedup(t *testing.T) {
 		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			return &ttl, dest.SetString(testval)
 		}),
-		ContainerFunc(func(_ Context, key string) (*Metadata, error) {
-			length := len(testval)
-			return &Metadata{Length: int64(length), TTL: &ttl}, nil
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil

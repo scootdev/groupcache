@@ -39,8 +39,6 @@ message ContainRequest {
 message ContainResponse {
   double minute_qps = 1;
   bool exists = 2;
-  google.protobuf.Timestamp ttl = 3;
-  int64 length = 4;
 }
 
 message PutRequest {

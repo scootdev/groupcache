@@ -170,24 +170,12 @@ func handleGet(ctx Context, w http.ResponseWriter, group *Group, key string) {
 }
 
 func handleContain(ctx Context, w http.ResponseWriter, group *Group, key string) {
-	md, err := group.Contain(ctx, key)
+	ok, err := group.Contain(ctx, key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp := &pb.ContainResponse{}
-	if md != nil {
-		if md.TTL != nil {
-			ttlTimestamp, err := ptypes.TimestampProto(*md.TTL)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			resp.Ttl = ttlTimestamp
-		}
-		resp.Exists = true
-		resp.Length = md.Length
-	}
+	resp := &pb.ContainResponse{Exists: ok}
 
 	// Write the value to the response body as a proto message.
 	body, err := proto.Marshal(resp)
