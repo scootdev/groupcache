@@ -26,7 +26,6 @@ limitations under the License.
 // Put supports manual loading of a data's canonical owner's cache.
 package groupcache
 
-//TODO(apratti): need to fix mem leak
 import (
 	"errors"
 	"math/rand"
@@ -665,10 +664,7 @@ func (g *Group) checkCache(key string) *Metadata {
 func (g *Group) populateCacheMetadata(key string, md *Metadata, cache *cache) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	cmd := cache.getMetadata(key)
-	cmd.setExists(true)
-	cmd.setTTL(md.TTL)
-	cmd.setLength(md.Length)
+	cache.updateMetadata(key, md.TTL, md.Length)
 }
 
 func (g *Group) populateCache(key string, payload payload, cache *cache) {
@@ -738,12 +734,11 @@ type cache struct {
 // This structure was chosen so that it could hold additional
 // fields in the future.
 type cacheValueMetadata struct {
-	exists bool
 	ttl    *time.Time
 	length int64
 }
 
-func (c *cache) getMetadata(key string) *cacheValueMetadata {
+func (c *cache) updateMetadata(key string, ttl *time.Time, length int64) *cacheValueMetadata {
 	if c.metadata == nil {
 		c.metadata = make(map[string]*cacheValueMetadata)
 	}
@@ -752,11 +747,17 @@ func (c *cache) getMetadata(key string) *cacheValueMetadata {
 		m = &cacheValueMetadata{}
 		c.metadata[key] = m
 	}
+	m.setTTL(ttl)
+	m.setLength(length)
 	return m
 }
 
-func (c *cacheValueMetadata) setExists(e bool) {
-	c.exists = e
+func (c *cache) getMetadata(key string) *cacheValueMetadata {
+	if c.metadata == nil {
+		c.metadata = make(map[string]*cacheValueMetadata)
+	}
+	m := c.metadata[key]
+	return m
 }
 
 func (c *cacheValueMetadata) setTTL(t *time.Time) {
@@ -785,10 +786,7 @@ func (c *cache) stats() CacheStats {
 func (c *cache) add(key string, payload payload) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	md := c.getMetadata(key)
-	md.setExists(true)
-	md.setTTL(payload.TTL)
-	md.setLength(int64(payload.value.Len()))
+	c.updateMetadata(key, payload.TTL, int64(payload.value.Len()))
 	if c.lru == nil {
 		c.lru = &lru.Cache{
 			OnEvicted: func(key lru.Key, value interface{}) {
@@ -811,7 +809,7 @@ func (c *cache) get(key string) (p payload, ok bool) {
 		return
 	}
 	md := c.getMetadata(key)
-	if !md.exists {
+	if md == nil {
 		return
 	}
 	var ttl *time.Time
@@ -830,10 +828,11 @@ func (c *cache) get(key string) (p payload, ok bool) {
 func (c *cache) check(key string) *Metadata {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if exists := c.getMetadata(key).exists; !exists {
+	cvmd := c.getMetadata(key)
+	if cvmd == nil {
 		return nil
 	}
-	cvmd := c.getMetadata(key)
+
 	md := &Metadata{Length: cvmd.length, TTL: cvmd.ttl}
 	return md
 }
