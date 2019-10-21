@@ -39,7 +39,7 @@ import (
 
 var (
 	once                               sync.Once
-	stringGroup, protoGroup, byteGroup GetterPutter
+	stringGroup, protoGroup, byteGroup GetterContainerPutter
 
 	stringc = make(chan string)
 
@@ -49,6 +49,8 @@ var (
 	// protoGroup's Getter have been called. Read using the
 	// cacheFills function.
 	cacheFills AtomicInt
+	// like cacheFills, but for the group's Container
+	cacheMeta AtomicInt
 	// like cacheFills, but for the group's Putter
 	cachePuts AtomicInt
 	ttl       = time.Now().UTC().Add(time.Hour)
@@ -63,6 +65,25 @@ const (
 	cacheSize       = 1 << 20
 )
 
+// TODO(apratti): add better test facilities
+func newTestGroup(name, testval string) *Group {
+	return newGroup(
+		name,
+		1024,
+		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
+
+			return &ttl, dest.SetString(testval)
+		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			return true, nil
+		}),
+		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
+			return nil
+		}),
+		nil,
+	)
+}
+
 func testSetup() {
 	stringGroup = NewGroup(
 		stringGroupName,
@@ -73,6 +94,13 @@ func testSetup() {
 			}
 			cacheFills.Add(1)
 			return &ttl, dest.SetString("ECHO:" + key)
+		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheMeta.Add(1)
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
@@ -96,6 +124,13 @@ func testSetup() {
 				City: proto.String("SOME-CITY"),
 			})
 		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheMeta.Add(1)
+			return true, nil
+		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
 				key = <-stringc
@@ -114,6 +149,13 @@ func testSetup() {
 			}
 			cacheFills.Add(1)
 			return &ttl, dest.SetBytes([]byte("ECHO:" + key))
+		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			if key == fromChan {
+				key = <-stringc
+			}
+			cacheMeta.Add(1)
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			if key == fromChan {
@@ -217,6 +259,12 @@ func countFills(f func()) int64 {
 	return cacheFills.Get() - fills0
 }
 
+func countMeta(f func()) int64 {
+	meta0 := cacheMeta.Get()
+	f()
+	return cacheMeta.Get() - meta0
+}
+
 func countPuts(f func()) int64 {
 	puts0 := cachePuts.Get()
 	f()
@@ -225,6 +273,18 @@ func countPuts(f func()) int64 {
 
 func TestCaching(t *testing.T) {
 	once.Do(testSetup)
+	meta := countMeta(func() {
+		for i := 0; i < 10; i++ {
+			if _, err := stringGroup.Contain(dummyCtx, "TestCaching-key1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	// Contain calls do not populate the cache, should call parent everytime.
+	if meta != 10 {
+		t.Errorf("expected 10 underlying contain; got %d", meta)
+	}
+
 	// gets
 	fills := countFills(func() {
 		for i := 0; i < 10; i++ {
@@ -237,6 +297,19 @@ func TestCaching(t *testing.T) {
 	if fills != 1 {
 		t.Errorf("expected 1 cache fill; got %d", fills)
 	}
+
+	meta = countMeta(func() {
+		for i := 0; i < 10; i++ {
+			if _, err := stringGroup.Contain(dummyCtx, "TestCaching-key1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	// Now that the cache is populated, meta should use the cached results from Get.
+	if meta != 0 {
+		t.Errorf("expected 0 meta; got %d", meta)
+	}
+
 	// puts
 	puts := countPuts(func() {
 		for i := 0; i < 10; i++ {
@@ -263,6 +336,12 @@ func TestResourceExpiration(t *testing.T) {
 				return &expiredTTL, nil
 			}
 			return &ttl, dest.SetString(testval)
+		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			if key == expiredKey {
+				return false, nil
+			}
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil
@@ -353,6 +432,14 @@ func (p *fakePeer) Get(_ Context, in *pb.GetRequest, out *pb.GetResponse) error 
 	return nil
 }
 
+func (p *fakePeer) Contain(_ Context, in *pb.ContainRequest, out *pb.ContainResponse) error {
+	p.hits++
+	if p.fail {
+		return errors.New("simulated error from peer")
+	}
+	return nil
+}
+
 func (p *fakePeer) Put(_ Context, in *pb.PutRequest, out *pb.PutResponse) error {
 	p.hits++
 	if p.fail {
@@ -385,11 +472,15 @@ func TestPeers(t *testing.T) {
 		localHits++
 		return &ttl, dest.SetString("got:" + key)
 	}
+	container := func(_ Context, key string) (bool, error) {
+		localHits++
+		return true, nil
+	}
 	putter := func(_ Context, key string, data []byte, ttl *time.Time) error {
 		localHits++
 		return nil
 	}
-	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), PutterFunc(putter), peerList)
+	testGroup := newGroup("TestPeers-group", cacheSize, GetterFunc(getter), ContainerFunc(container), PutterFunc(putter), peerList)
 	run := func(name string, n, m int, wantSummary string) {
 		// Reset counters
 		localHits = 0
@@ -560,6 +651,9 @@ func TestNoDedup(t *testing.T) {
 		1024,
 		GetterFunc(func(_ Context, key string, dest Sink) (*time.Time, error) {
 			return &ttl, dest.SetString(testval)
+		}),
+		ContainerFunc(func(_ Context, key string) (bool, error) {
+			return true, nil
 		}),
 		PutterFunc(func(_ Context, key string, data []byte, ttl *time.Time) error {
 			return nil

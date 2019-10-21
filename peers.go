@@ -30,6 +30,7 @@ type Context interface{}
 // ProtoPeer is the interface that must be implemented by a peer.
 type ProtoPeer interface {
 	Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error
+	Contain(context Context, in *pb.ContainRequest, out *pb.ContainResponse) error
 	Put(context Context, in *pb.PutRequest, out *pb.PutResponse) error
 }
 

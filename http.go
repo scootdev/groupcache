@@ -142,6 +142,80 @@ func (p *HTTPPool) PickPeer(key string) (ProtoPeer, bool) {
 	return nil, false
 }
 
+func handleGet(ctx Context, w http.ResponseWriter, group *Group, key string) {
+	var value []byte
+	ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var ttlTimestamp *tspb.Timestamp = nil
+	if ttl != nil {
+		ttlTimestamp, err = ptypes.TimestampProto(*ttl)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
+func handleContain(ctx Context, w http.ResponseWriter, group *Group, key string) {
+	ok, err := group.Contain(ctx, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := &pb.ContainResponse{Exists: ok}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
+func handlePut(ctx Context, w http.ResponseWriter, group *Group, key string, reqBody io.ReadCloser) {
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(reqBody)
+	var p putBody
+	err := json.Unmarshal(buf.Bytes(), &p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var ttl *time.Time = nil
+	if p.HasTTL {
+		ttl = &p.TTL
+	}
+	err = group.Put(ctx, key, p.Value, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(&pb.PutResponse{})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+
 func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse request.
 	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
@@ -166,60 +240,15 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = p.Context(r)
 	}
 	group.Stats.ServerRequests.Add(1)
-
 	switch r.Method {
 	case "GET":
-		var value []byte
-		ttl, err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if _, ok := r.URL.Query()["exist"]; ok {
+			handleContain(ctx, w, group, key)
 			return
 		}
-
-		var ttlTimestamp *tspb.Timestamp = nil
-		if ttl != nil {
-			ttlTimestamp, err = ptypes.TimestampProto(*ttl)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.GetResponse{Value: value, Ttl: ttlTimestamp})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(body)
+		handleGet(ctx, w, group, key)
 	case "POST":
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(r.Body)
-		var p putBody
-		err := json.Unmarshal(buf.Bytes(), &p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		var ttl *time.Time = nil
-		if p.HasTTL {
-			ttl = &p.TTL
-		}
-		err = group.Put(ctx, key, p.Value, ttl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Write the value to the response body as a proto message.
-		body, err := proto.Marshal(&pb.PutResponse{})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(body)
+		handlePut(ctx, w, group, key, r.Body)
 	default:
 		http.Error(w, fmt.Sprintf("unsuported method: %s", r.Method), http.StatusBadRequest)
 		return
@@ -247,6 +276,43 @@ type putBody struct {
 func (h *httpPeer) Get(context Context, in *pb.GetRequest, out *pb.GetResponse) error {
 	u := fmt.Sprintf(
 		"%v%v/%v",
+		h.baseURL,
+		url.QueryEscape(in.GetGroup()),
+		url.QueryEscape(in.GetKey()),
+	)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return err
+	}
+	tr := http.DefaultTransport
+	if h.transport != nil {
+		tr = h.transport(context)
+	}
+	res, err := tr.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned: %v", res.Status)
+	}
+	b := bufferPool.Get().(*bytes.Buffer)
+	b.Reset()
+	defer bufferPool.Put(b)
+	_, err = io.Copy(b, res.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %v", err)
+	}
+	err = proto.Unmarshal(b.Bytes(), out)
+	if err != nil {
+		return fmt.Errorf("decoding response body: %v", err)
+	}
+	return nil
+}
+
+func (h *httpPeer) Contain(context Context, in *pb.ContainRequest, out *pb.ContainResponse) error {
+	u := fmt.Sprintf(
+		"%v%v/%v?exist",
 		h.baseURL,
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
