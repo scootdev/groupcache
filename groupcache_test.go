@@ -273,6 +273,17 @@ func countPuts(f func()) int64 {
 
 func TestCaching(t *testing.T) {
 	once.Do(testSetup)
+	meta := countMeta(func() {
+		for i := 0; i < 10; i++ {
+			if _, err := stringGroup.Contain(dummyCtx, "TestCaching-key1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if meta != 10 {
+		t.Errorf("expected 10 underlying contain; got %d", meta)
+	}
+
 	// gets
 	fills := countFills(func() {
 		for i := 0; i < 10; i++ {
@@ -284,6 +295,17 @@ func TestCaching(t *testing.T) {
 	})
 	if fills != 1 {
 		t.Errorf("expected 1 cache fill; got %d", fills)
+	}
+
+	meta = countMeta(func() {
+		for i := 0; i < 10; i++ {
+			if _, err := stringGroup.Contain(dummyCtx, "TestCaching-key1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if meta != 0 {
+		t.Errorf("expected 0 meta; got %d", meta)
 	}
 	// puts
 	puts := countPuts(func() {
