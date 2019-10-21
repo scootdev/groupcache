@@ -280,6 +280,7 @@ func TestCaching(t *testing.T) {
 			}
 		}
 	})
+	// Contain calls do not populate the cache, should call parent everytime.
 	if meta != 10 {
 		t.Errorf("expected 10 underlying contain; got %d", meta)
 	}
@@ -304,9 +305,11 @@ func TestCaching(t *testing.T) {
 			}
 		}
 	})
+	// Now that the cache is populated, meta should use the cached results from Get.
 	if meta != 0 {
 		t.Errorf("expected 0 meta; got %d", meta)
 	}
+
 	// puts
 	puts := countPuts(func() {
 		for i := 0; i < 10; i++ {
