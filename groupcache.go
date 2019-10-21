@@ -253,7 +253,7 @@ type Stats struct {
 	LoadsDeduped   AtomicInt // after singleflight
 	LocalLoads     AtomicInt // total good local loads
 	LocalLoadErrs  AtomicInt // total bad local loads
-	Checks         AtomicInt // Gets not from the cache
+	Checks         AtomicInt // Checks not from the cache
 	ChecksDeduped  AtomicInt // after singleflight
 	LocalChecks    AtomicInt // total good local loads
 	LocalCheckErrs AtomicInt // total bad local loads
