@@ -37,8 +37,8 @@ message ContainRequest {
 }
 
 message ContainResponse {
-  double minute_qps = 1;
-  bool exists = 2;
+  bool exists = 1;
+  double minute_qps = 2;
 }
 
 message PutRequest {
