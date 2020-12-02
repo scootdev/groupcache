@@ -1,5 +1,5 @@
 # groupcache
-[![Build Status](https://travis-ci.org/twitter/groupcache.svg?branch=master)](https://travis-ci.org/twitter/groupcache)
+[![Build Status](https://github.com/twitter/groupcache/workflows/ci/badge.svg)](https://github.com/twitter/groupcache/actions)
 [![codecov.io](https://codecov.io/github/twitter/groupcache/coverage.svg?branch=master)](https://codecov.io/gh/twitter/groupcache?branch=master)
 [![GoDoc](https://godoc.org/github.com/twitter/groupcache?status.svg)](https://godoc.org/github.com/twitter/groupcache)
 
