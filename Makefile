@@ -23,4 +23,4 @@ coverage:
 clean:
 	go clean ./...
 
-travis: format vet test coverage
+ci: format vet test coverage
